@@ -132,7 +132,7 @@ void ShimProcess::SetProcess(ICorDebugProcess * pProcess)
     if (pProcess != NULL)
     {
         // Verify that DataTarget + new process have the same pid?
-        _ASSERTE(m_pProcess->GetPid() == m_pLiveDataTarget->GetPid());
+        _ASSERTE(m_pProcess->GetProcessDescriptor()->m_Pid == m_pLiveDataTarget->GetPid());
     }
 }
 
@@ -152,12 +152,12 @@ void ShimProcess::SetProcess(ICorDebugProcess * pProcess)
 // Notes:
 //    Only call this once, during the initialization dance. 
 //
-HRESULT ShimProcess::InitializeDataTarget(DWORD processId)
+HRESULT ShimProcess::InitializeDataTarget(const ProcessDescriptor * pProcessDescriptor)
 {
     _ASSERTE(m_pLiveDataTarget == NULL);
 
     
-    HRESULT hr = BuildPlatformSpecificDataTarget(GetMachineInfo(), processId, &m_pLiveDataTarget);
+    HRESULT hr = BuildPlatformSpecificDataTarget(GetMachineInfo(), pProcessDescriptor, &m_pLiveDataTarget);
     if (FAILED(hr))
     {
         _ASSERTE(m_pLiveDataTarget == NULL);
@@ -676,7 +676,7 @@ bool ShimProcess::RemoveDuplicateCreationEventIfPresent(void * pKey)
 //   It can be passed into ICorDebugProcess4::Filter.
 CorDebugRecordFormat GetHostExceptionRecordFormat()
 {
-#if defined(_WIN64)
+#if defined(BIT64)
     return FORMAT_WINDOWS_EXCEPTIONRECORD64;
 #else
     return FORMAT_WINDOWS_EXCEPTIONRECORD32;

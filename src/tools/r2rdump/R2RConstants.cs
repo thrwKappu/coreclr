@@ -32,6 +32,14 @@ namespace R2RDump
     };
 
     /// <summary>
+    /// based on <a href="https://github.com/dotnet/coreclr/blob/master/src/inc/corcompile.h">src/inc/corcompile.h</a> CorCompileImportFlags
+    /// </summary>
+    public enum CORCOMPILE_FIXUP_BLOB_KIND
+    {
+        ENCODE_MODULE_OVERRIDE = 0x80,     /* When the high bit is set, override of the module immediately follows */
+    }
+
+    /// <summary>
     /// Constants for method and field encoding
     /// </summary>
     [Flags]
@@ -112,6 +120,8 @@ namespace R2RDump
 
         READYTORUN_FIXUP_DelegateCtor = 0x2C, /* optimized delegate ctor */
         READYTORUN_FIXUP_DeclaringTypeHandle = 0x2D,
+
+        READYTORUN_FIXUP_IndirectPInvokeTarget = 0x2E, /* Target of an inlined pinvoke */
     }
 
     //
@@ -162,6 +172,10 @@ namespace R2RDump
 
         READYTORUN_HELPER_MemSet = 0x40,
         READYTORUN_HELPER_MemCpy = 0x41,
+
+        // PInvoke helpers
+        READYTORUN_HELPER_PInvokeBegin = 0x42,
+        READYTORUN_HELPER_PInvokeEnd = 0x43,
 
         // Get string handle lazily
         READYTORUN_HELPER_GetString = 0x50,
@@ -232,6 +246,10 @@ namespace R2RDump
         READYTORUN_HELPER_PersonalityRoutine = 0xF0,
         READYTORUN_HELPER_PersonalityRoutineFilterFunclet = 0xF1,
 
+        // Synchronized methods
+        READYTORUN_HELPER_MonitorEnter = 0xF8,
+        READYTORUN_HELPER_MonitorExit = 0xF9,
+
         //
         // Deprecated/legacy
         //
@@ -252,9 +270,6 @@ namespace R2RDump
 
         // JIT32 x86-specific exception handling
         READYTORUN_HELPER_EndCatch = 0x110,
-
-        // A flag to indicate that a helper call uses VSD
-        READYTORUN_HELPER_FLAG_VSD = 0x10000000,
     }
 
     public enum CorElementType : byte

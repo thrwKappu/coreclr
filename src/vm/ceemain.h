@@ -25,9 +25,6 @@ HRESULT EnsureEEStarted(COINITIEE flags);
 // Wrapper around EnsureEEStarted which also sets startup mode.
 HRESULT InitializeEE(COINITIEE flags);
 
-// Has the EE been started up?
-BOOL IsRuntimeStarted(DWORD *pdwStartupFlags);
-
 // Enum to control what happens at the end of EE shutdown. There are two options:
 // 1. Call ::ExitProcess to cause the process to terminate gracefully. This is how
 //    shutdown normally ends. "Shutdown" methods that take this action as an argument
@@ -68,10 +65,6 @@ public:
 
     // Delete on TLS block
     static void DeleteTLS(void **pTlsData);
-
-    // Fiber switch notifications
-    static void SwitchIn();
-    static void SwitchOut();
 
     static void **CheckThreadState(DWORD slot, BOOL force = TRUE);
     static void **CheckThreadStateNoCreate(DWORD slot
@@ -184,10 +177,6 @@ private:
     HANDLE STDMETHODCALLTYPE ClrGetProcessExecutableHeap();
     
 };
-
-#ifdef _DEBUG
-extern void DisableGlobalAllocStore ();
-#endif //_DEBUG 
 
 void SetLatchedExitCode (INT32 code);
 INT32 GetLatchedExitCode (void);

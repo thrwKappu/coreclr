@@ -139,14 +139,14 @@ public:
                              size_t *hotSize,
                              size_t *coldSize);
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
     DWORD GetFuncletStartOffsets(const BYTE *pStart, DWORD* pStartOffsets, DWORD dwLength);
     StackFrame FindParentStackFrame(CrawlFrame* pCF);
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
     size_t GetFunctionSize(MethodDesc *pFD) DAC_UNEXPECTED();
 
-    const PCODE GetFunctionAddress(MethodDesc *pFD);
+    PCODE GetFunctionAddress(MethodDesc *pFD);
 
     void DisablePreemptiveGC(void);
 
@@ -342,6 +342,10 @@ public:
 #ifdef _DEBUG
     virtual void ObjectRefFlush(Thread *pThread);
 #endif
+#endif
+
+#ifndef DACCESS_COMPILE
+    virtual BOOL AdjustContextForWriteBarrierForDebugger(CONTEXT* context);
 #endif
 };
 

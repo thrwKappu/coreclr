@@ -18,6 +18,8 @@
 #include "typestring.h"
 #include "debugdebugger.h"
 
+#include <configuration.h>
+
 #include "../dlls/mscorrc/resource.h"
 
 #include "getproductversionnumber.h"
@@ -106,7 +108,16 @@ EventReporter::EventReporter(EventReporterType type)
         {
             m_Description.Append(ssMessage);
             m_Description.Append(W("\n"));
-        }        
+        }
+    }
+
+    // Log the .NET Core Version if we can get it
+    LPCWSTR fxProductVersion = Configuration::GetKnobStringValue(W("FX_PRODUCT_VERSION"));
+    if (fxProductVersion != nullptr)
+    {
+        m_Description.Append(W(".NET Core Version: "));
+        m_Description.Append(fxProductVersion);
+        m_Description.Append(W("\n"));
     }
 
     ssMessage.Clear();
@@ -124,7 +135,7 @@ EventReporter::EventReporter(EventReporterType type)
 
     case ERT_ManagedFailFast:
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_MANAGEDFAILFAST))
-            m_Description.Append(W("Description: The application requested process termination through System.Environment.FailFast(string message)."));
+            m_Description.Append(W("Description: The application requested process termination through Environment.FailFast."));
         else
         {
             m_Description.Append(ssMessage);
@@ -134,7 +145,7 @@ EventReporter::EventReporter(EventReporterType type)
 
     case ERT_UnmanagedFailFast:
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_UNMANAGEDFAILFAST))
-            m_Description.Append(W("Description: The process was terminated due to an internal error in the .NET Runtime "));
+            m_Description.Append(W("Description: The process was terminated due to an internal error in the .NET Runtime."));
         else
         {
             m_Description.Append(ssMessage);
@@ -144,7 +155,7 @@ EventReporter::EventReporter(EventReporterType type)
     case ERT_StackOverflow:
         // Fetch the localized Stack Overflow Error text or fall back on a hardcoded variant if things get dire.
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_STACK_OVERFLOW))
-            m_Description.Append(W("Description: The process was terminated due to stack overflow."));
+            m_Description.Append(W("Description: The process was terminated due to a stack overflow."));
         else
         {
             m_Description.Append(ssMessage);
@@ -185,7 +196,6 @@ void EventReporter::AddDescription(__in WCHAR *pString)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -209,7 +219,6 @@ void EventReporter::AddDescription(SString& s)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -265,7 +274,6 @@ void EventReporter::BeginStackTrace()
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -359,7 +367,6 @@ void EventReporter::AddFailFastStackTrace(SString& s)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -533,7 +540,6 @@ StackWalkAction LogCallstackForEventReporterCallback(
     {
         THROWS;
         GC_TRIGGERS;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;

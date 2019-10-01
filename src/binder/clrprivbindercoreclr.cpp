@@ -181,21 +181,6 @@ Exit:;
 }
 #endif // !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 
-HRESULT CLRPrivBinderCoreCLR::VerifyBind(IAssemblyName        *AssemblyName,
-                                         ICLRPrivAssembly     *pAssembly,
-                                         ICLRPrivAssemblyInfo *pAssemblyInfo)
-{
-    return E_FAIL;
-}
-         
-HRESULT CLRPrivBinderCoreCLR::GetBinderFlags(DWORD *pBinderFlags)
-{
-    if (pBinderFlags == NULL)
-        return E_INVALIDARG;
-    *pBinderFlags = BINDER_NONE;
-    return S_OK;
-}
-         
 HRESULT CLRPrivBinderCoreCLR::GetBinderID( 
         UINT_PTR *pBinderId)
 {
@@ -203,18 +188,6 @@ HRESULT CLRPrivBinderCoreCLR::GetBinderID(
     return S_OK;
 }
          
-HRESULT CLRPrivBinderCoreCLR::FindAssemblyBySpec( 
-            LPVOID pvAppDomain,
-            LPVOID pvAssemblySpec,
-            HRESULT *pResult,
-            ICLRPrivAssembly **ppAssembly)
-{
-    // We are not using a cache at this level
-    // However, assemblies bound by the CoreCLR binder is already cached in the
-    // AppDomain and will be resolved from there if required
-    return E_FAIL;
-}
-
 HRESULT CLRPrivBinderCoreCLR::SetupBindingPaths(SString  &sTrustedPlatformAssemblies,
                                                 SString  &sPlatformResourceRoots,
                                                 SString  &sAppPaths,
@@ -228,20 +201,6 @@ HRESULT CLRPrivBinderCoreCLR::SetupBindingPaths(SString  &sTrustedPlatformAssemb
     }
     EX_CATCH_HRESULT(hr);
     return hr;
-}
-
-bool CLRPrivBinderCoreCLR::IsInTpaList(const SString &sFileName)
-{
-    bool fIsFileOnTpaList = false;
-    
-    TpaFileNameHash * tpaFileNameMap = m_appContext.GetTpaFileNameList();
-    if (tpaFileNameMap != nullptr)
-    {
-        const FileNameMapEntry *pTpaEntry = tpaFileNameMap->LookupPtr(sFileName.GetUnicode());
-        fIsFileOnTpaList = (pTpaEntry != nullptr);
-    }
-    
-    return fIsFileOnTpaList;
 }
 
 // See code:BINDER_SPACE::AssemblyBinder::GetAssembly for info on fNgenExplicitBind
@@ -297,19 +256,3 @@ HRESULT CLRPrivBinderCoreCLR::GetLoaderAllocator(LPVOID* pLoaderAllocator)
     // Not supported by this binder
     return E_FAIL;
 }
-
-#ifndef CROSSGEN_COMPILE
-HRESULT CLRPrivBinderCoreCLR::PreBindByteArray(PEImage  *pPEImage, BOOL fInspectionOnly)
-{
-    HRESULT hr = S_OK;
-    VALIDATE_ARG_RET(pPEImage != NULL);
-
-    EX_TRY
-    {
-        hr = AssemblyBinder::PreBindByteArray(&m_appContext, pPEImage, fInspectionOnly);
-    }
-    EX_CATCH_HRESULT(hr);
-    
-    return hr;
-}
-#endif // CROSSGEN_COMPILE

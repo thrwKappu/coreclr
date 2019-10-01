@@ -883,67 +883,6 @@ void ThisPtrRetBufPrecode::Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocat
 }
 
 
-#ifdef HAS_REMOTING_PRECODE
-
-void RemotingPrecode::Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocator)
-{
-    WRAPPER_NO_CONTRACT;
-
-    int n = 0;
-
-    m_rgCode[n++] = 0xb502; // push {r1,lr}
-    m_rgCode[n++] = 0x4904; // ldr r1, [pc, #16]   ; =m_pPrecodeRemotingThunk
-    m_rgCode[n++] = 0x4788; // blx r1
-    m_rgCode[n++] = 0xe8bd; // pop {r1,lr}
-    m_rgCode[n++] = 0x4002;
-    m_rgCode[n++] = 0xf8df; // ldr pc, [pc, #12]    ; =m_pLocalTarget
-    m_rgCode[n++] = 0xf00c;
-    m_rgCode[n++] = 0xbf00; // nop                  ; padding for alignment
-
-    _ASSERTE(n == _countof(m_rgCode));
-
-    m_pMethodDesc = (TADDR)pMD;
-    m_pPrecodeRemotingThunk = GetEEFuncEntryPoint(PrecodeRemotingThunk);
-    m_pLocalTarget = GetPreStubEntryPoint();
-}
-
-#ifdef FEATURE_NATIVE_IMAGE_GENERATION
-void RemotingPrecode::Fixup(DataImage *image, ZapNode *pCodeNode)
-{
-    WRAPPER_NO_CONTRACT;
-
-    if (pCodeNode)
-        image->FixupFieldToNode(this, offsetof(RemotingPrecode, m_pLocalTarget),
-                                pCodeNode,
-                                THUMB_CODE,
-                                IMAGE_REL_BASED_PTR);
-    else
-        image->FixupFieldToNode(this, offsetof(RemotingPrecode, m_pLocalTarget),
-                                image->GetHelperThunk(CORINFO_HELP_EE_PRESTUB),
-                                0,
-                                IMAGE_REL_BASED_PTR);
-
-    image->FixupFieldToNode(this, offsetof(RemotingPrecode, m_pPrecodeRemotingThunk),
-                            image->GetHelperThunk(CORINFO_HELP_EE_REMOTING_THUNK),
-                            0,
-                            IMAGE_REL_BASED_PTR);
-
-    image->FixupField(this, offsetof(RemotingPrecode, m_pMethodDesc),
-                      (void*)GetMethodDesc(),
-                      0,
-                      IMAGE_REL_BASED_PTR);
-}
-#endif // FEATURE_NATIVE_IMAGE_GENERATION
-
-void CTPMethodTable::ActivatePrecodeRemotingThunk()
-{
-    // Nothing to do for ARM version of remoting precode (we don't burn the TP MethodTable pointer into
-    // PrecodeRemotingThunk directly).
-}
-
-#endif // HAS_REMOTING_PRECODE
-
-
 #ifndef CROSSGEN_COMPILE
 /*
 Rough pseudo-code of interface dispatching:
@@ -975,11 +914,6 @@ Note that ResolveWorkerChainLookupAsmStub currently points directly
 to ResolveWorkerAsmStub; in the future, this could be separate.
 */
 
-void LookupHolder::InitializeStatic()
-{
-    // Nothing to initialize
-}
-
 void  LookupHolder::Initialize(PCODE resolveWorkerTarget, size_t dispatchToken)
 {
     // Called directly by JITTED code
@@ -996,11 +930,6 @@ void  LookupHolder::Initialize(PCODE resolveWorkerTarget, size_t dispatchToken)
     _stub._token               = dispatchToken;
     _ASSERTE(4 == LookupStub::entryPointLen);
 }
-
-void DispatchHolder::InitializeStatic()
-{
-    // Nothing to initialize
-};
 
 void  DispatchHolder::Initialize(PCODE implTarget, PCODE failTarget, size_t expectedMT)
 {
@@ -1072,10 +1001,6 @@ void  DispatchHolder::Initialize(PCODE implTarget, PCODE failTarget, size_t expe
     _stub._expectedMT = DWORD(expectedMT);
     _stub._failTarget = failTarget;
     _stub._implTarget = implTarget;
-}
-
-void ResolveHolder::InitializeStatic()
-{
 }
 
 void ResolveHolder::Initialize(PCODE resolveWorkerTarget, PCODE patcherTarget,
@@ -1401,6 +1326,7 @@ Stub *GenerateInitPInvokeFrameHelper()
     ThumbReg regFrame   = ThumbReg(4);
     ThumbReg regThread  = ThumbReg(5);
     ThumbReg regScratch = ThumbReg(6);
+    ThumbReg regR9 = ThumbReg(9);
 
 #ifdef FEATURE_PAL
     // Erect frame to perform call to GetThread
@@ -1431,8 +1357,11 @@ Stub *GenerateInitPInvokeFrameHelper()
     psl->ThumbEmitLoadRegIndirect(regScratch, regThread, offsetof(Thread, m_pFrame));
     psl->ThumbEmitStoreRegIndirect(regScratch, regFrame, FrameInfo.offsetOfFrameLink - negSpace);
 
-    // str FP, [regFrame + FrameInfo.offsetOfCalleeSavedEbp]
+    // str FP, [regFrame + FrameInfo.offsetOfCalleeSavedFP]
     psl->ThumbEmitStoreRegIndirect(thumbRegFp, regFrame, FrameInfo.offsetOfCalleeSavedFP - negSpace);
+
+    // str R9, [regFrame + FrameInfo.offsetOfSPAfterProlog]
+    psl->ThumbEmitStoreRegIndirect(regR9, regFrame, FrameInfo.offsetOfSPAfterProlog - negSpace);
 
     // mov [regFrame + FrameInfo.offsetOfReturnAddress], 0
     psl->ThumbEmitMovConstant(regScratch, 0);
@@ -1899,33 +1828,42 @@ void StubLinkerCPU::ThumbEmitCallWithGenericInstantiationParameter(MethodDesc *p
     if (cArgDescriptors > 1)
     {
         // Start by assuming we have all four register destination descriptors.
-        DWORD idxLastRegDesc = min(3, cArgDescriptors - 1);
+        int idxLastRegDesc = min(3, cArgDescriptors - 1);
 
         // Adjust that count to match reality.
-        while (!rgArgDescs[idxLastRegDesc].m_fDstIsReg)
+        while (idxLastRegDesc >= 0 && !rgArgDescs[idxLastRegDesc].m_fDstIsReg)
         {
-            _ASSERTE(idxLastRegDesc > 0);
             idxLastRegDesc--;
         }
-
-        // First move to stack location happens after the last move to register location
-        idxFirstMoveToStack = idxLastRegDesc+1;
-
-        // Calculate how many descriptors we'll need to swap.
-        DWORD cSwaps = (idxLastRegDesc + 1) / 2;
-
-        // Finally we can swap the descriptors.
-        DWORD idxFirstRegDesc = 0;
-        while (cSwaps)
+        
+        if (idxLastRegDesc < 0)
         {
-            ArgDesc sTempDesc = rgArgDescs[idxLastRegDesc];
-            rgArgDescs[idxLastRegDesc] = rgArgDescs[idxFirstRegDesc];
-            rgArgDescs[idxFirstRegDesc] = sTempDesc;
+            // No register is used to pass any of the parameters. No need to reverse the order of the descriptors
+            idxFirstMoveToStack = 0;
+        }
+        else
+        {
+            _ASSERTE(idxLastRegDesc >= 0 && ((DWORD)idxLastRegDesc) < cArgDescriptors);
+            
+            // First move to stack location happens after the last move to register location
+            idxFirstMoveToStack = idxLastRegDesc+1;
 
-            _ASSERTE(idxFirstRegDesc < idxLastRegDesc);
-            idxFirstRegDesc++;
-            idxLastRegDesc--;
-            cSwaps--;
+            // Calculate how many descriptors we'll need to swap.
+            DWORD cSwaps = (idxLastRegDesc + 1) / 2;
+
+            // Finally we can swap the descriptors.
+            int idxFirstRegDesc = 0;
+            while (cSwaps)
+            {
+                ArgDesc sTempDesc = rgArgDescs[idxLastRegDesc];
+                rgArgDescs[idxLastRegDesc] = rgArgDescs[idxFirstRegDesc];
+                rgArgDescs[idxFirstRegDesc] = sTempDesc;
+
+                _ASSERTE(idxFirstRegDesc < idxLastRegDesc);
+                idxFirstRegDesc++;
+                idxLastRegDesc--;
+                cSwaps--;
+            }
         }
     }
 
@@ -2440,8 +2378,8 @@ void InlinedCallFrame::UpdateRegDisplay(const PREGDISPLAY pRD)
 
     // This is necessary to unwind methods with alloca. This needs to stay 
     // in sync with definition of REG_SAVED_LOCALLOC_SP in the JIT.
-    pRD->pCurrentContext->R9 = (DWORD) dac_cast<TADDR>(m_pCallSiteSP);
-    pRD->pCurrentContextPointers->R9 = (DWORD *)&m_pCallSiteSP;
+    pRD->pCurrentContext->R9 = (DWORD) dac_cast<TADDR>(m_pSPAfterProlog);
+    pRD->pCurrentContextPointers->R9 = (DWORD *)&m_pSPAfterProlog;
 
     RETURN;
 }
@@ -3409,7 +3347,7 @@ Stub * StubLinkerCPU::CreateTailCallCopyArgsThunk(CORINFO_SIG_INFO * pSig,
         pSl->ThumbEmitJumpRegister(thumbRegLr);
     }
 
-    LoaderHeap* pHeap = pMD->GetLoaderAllocatorForCode()->GetStubHeap();
+    LoaderHeap* pHeap = pMD->GetLoaderAllocator()->GetStubHeap();
     return pSl->Link(pHeap);
 }
 
@@ -3448,6 +3386,16 @@ void emitCOMStubCall (ComCallMethodDesc *pCOMMethod, PCODE target)
 }
 #endif // FEATURE_COMINTEROP
 
+void MovRegImm(BYTE* p, int reg, TADDR imm)
+{
+    LIMITED_METHOD_CONTRACT;
+    *(WORD *)(p + 0) = 0xF240;
+    *(WORD *)(p + 2) = (UINT16)(reg << 8);
+    *(WORD *)(p + 4) = 0xF2C0;
+    *(WORD *)(p + 6) = (UINT16)(reg << 8);
+    PutThumb2Mov32((UINT16 *)p, imm);
+}
+
 #ifndef DACCESS_COMPILE
 
 #ifndef CROSSGEN_COMPILE
@@ -3471,16 +3419,6 @@ void emitCOMStubCall (ComCallMethodDesc *pCOMMethod, PCODE target)
     while (p < pStart + cbAligned) { *(WORD *)p = 0xdefe; p += 2; } \
     ClrFlushInstructionCache(pStart, cbAligned); \
     return (PCODE)((TADDR)pStart | THUMB_CODE)
-
-static void MovRegImm(BYTE* p, int reg, TADDR imm)
-{
-    LIMITED_METHOD_CONTRACT;
-    *(WORD *)(p + 0) = 0xF240;
-    *(WORD *)(p + 2) = (UINT16)(reg << 8);
-    *(WORD *)(p + 4) = 0xF2C0;
-    *(WORD *)(p + 6) = (UINT16)(reg << 8);
-    PutThumb2Mov32((UINT16 *)p, imm);
-}
 
 PCODE DynamicHelpers::CreateHelper(LoaderAllocator * pAllocator, TADDR arg, PCODE target)
 {

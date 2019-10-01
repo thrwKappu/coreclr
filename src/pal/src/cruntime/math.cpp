@@ -45,34 +45,6 @@ SET_DEFAULT_DEBUG_CHANNEL(CRT);
 
 /*++
 Function:
-  _signbit
-
-Determines whether given double-precision floating point value has a negative sign.
-
-Return Value
-
-_signbit returns a nonzero value (TRUE) if the sign of its argument x is negative.
-
-Parameter
-
-x  Double-precision floating-point value
-
---*/
-int __cdecl _signbit(double x)
-{
-    int ret;
-    PERF_ENTRY(_signbit);
-    ENTRY("_signbit (x=%f)\n", x);
-
-    ret = signbit(x);
-
-    LOGEXIT("_signbit returns int %d\n", ret);
-    PERF_EXIT(_signbit);
-    return ret;
-}
-
-/*++
-Function:
   _finite
 
 Determines whether given double-precision floating point value is finite.
@@ -311,21 +283,58 @@ PALIMPORT double __cdecl PAL_exp(double x)
 
 /*++
 Function:
-    labs
+    fma
 
 See MSDN.
 --*/
-PALIMPORT LONG __cdecl PAL_labs(LONG l)
+PALIMPORT double __cdecl PAL_fma(double x, double y, double z)
 {
-    long lRet;
-    PERF_ENTRY(labs);
-    ENTRY("labs (l=%ld)\n", l);
-    
-    lRet = labs(l);    
+    double ret;
+    PERF_ENTRY(fma);
+    ENTRY("fma (x=%f, y=%f, z=%f)\n", x, y, z);
 
-    LOGEXIT("labs returns long %ld\n", lRet);
-    PERF_EXIT(labs);
-    return (LONG)lRet; // This explicit cast to LONG is used to silence any potential warnings due to implicitly casting the native long lRet to LONG when returning.
+    ret = fma(x, y, z);
+
+    LOGEXIT("fma returns double %f\n", ret);
+    PERF_EXIT(fma);
+    return ret;
+}
+
+/*++
+Function:
+    ilogb
+
+See MSDN.
+--*/
+PALIMPORT int __cdecl PAL_ilogb(double x)
+{
+    int ret;
+    PERF_ENTRY(ilogb);
+    ENTRY("ilogb (x=%f)\n", x);
+
+#if !HAVE_COMPATIBLE_ILOGB0
+    if (x == 0.0)
+    {
+        ret = -2147483648;
+    }
+    else 
+#endif // !HAVE_COMPATIBLE_ILOGB0
+
+#if !HAVE_COMPATIBLE_ILOGBNAN
+    if (isnan(x))
+    {
+        ret = 2147483647;
+    }
+    else
+#endif // !HAVE_COMPATIBLE_ILOGBNAN
+
+    {
+        ret = ilogb(x);
+    }
+
+    LOGEXIT("ilogb returns int %d\n", ret);
+    PERF_EXIT(ilogb);
+    return ret;
 }
 
 /*++
@@ -355,6 +364,25 @@ PALIMPORT double __cdecl PAL_log(double x)
 
     LOGEXIT("log returns double %f\n", ret);
     PERF_EXIT(log);
+    return ret;
+}
+
+/*++
+Function:
+    log2
+
+See MSDN.
+--*/
+PALIMPORT double __cdecl PAL_log2(double x)
+{
+    double ret;
+    PERF_ENTRY(log2);
+    ENTRY("log2 (x=%f)\n", x);
+
+    ret = log2(x);
+
+    LOGEXIT("log2 returns double %f\n", ret);
+    PERF_EXIT(log2);
     return ret;
 }
 
@@ -483,29 +511,20 @@ PALIMPORT double __cdecl PAL_pow(double x, double y)
 
 /*++
 Function:
-  _signbitf
+    scalbn
 
-Determines whether given single-precision floating point value has a negative sign.
-
-Return Value
-
-_signbitf returns a nonzero value (TRUE) if the sign of its argument x is negative.
-
-Parameter
-
-x  Single-precision floating-point value
-
+See MSDN.
 --*/
-int __cdecl _signbitf(float x)
+PALIMPORT double __cdecl PAL_scalbn(double x, int n)
 {
-    int ret;
-    PERF_ENTRY(_signbitf);
-    ENTRY("_signbitf (x=%f)\n", x);
+    double ret;
+    PERF_ENTRY(scalbn);
+    ENTRY("scalbn (x=%f, n=%d)\n", x, n);
 
-    ret = signbit(x);
+    ret = scalbn(x, n);
 
-    LOGEXIT("_signbitf returns int %d\n", ret);
-    PERF_EXIT(_signbitf);
+    LOGEXIT("scalbn returns double %f\n", ret);
+    PERF_EXIT(scalbn);
     return ret;
 }
 
@@ -750,6 +769,62 @@ PALIMPORT float __cdecl PAL_expf(float x)
 
 /*++
 Function:
+    fmaf
+
+See MSDN.
+--*/
+PALIMPORT float __cdecl PAL_fmaf(float x, float y, float z)
+{
+    float ret;
+    PERF_ENTRY(fmaf);
+    ENTRY("fmaf (x=%f, y=%f, z=%f)\n", x, y, z);
+
+    ret = fmaf(x, y, z);
+
+    LOGEXIT("fma returns float %f\n", ret);
+    PERF_EXIT(fmaf);
+    return ret;
+}
+
+/*++
+Function:
+    ilogbf
+
+See MSDN.
+--*/
+PALIMPORT int __cdecl PAL_ilogbf(float x)
+{
+    int ret;
+    PERF_ENTRY(ilogbf);
+    ENTRY("ilogbf (x=%f)\n", x);
+
+#if !HAVE_COMPATIBLE_ILOGB0
+    if (x == 0.0f)
+    {
+        ret = -2147483648;
+    }
+    else 
+#endif // !HAVE_COMPATIBLE_ILOGB0
+
+#if !HAVE_COMPATIBLE_ILOGBNAN
+    if (isnan(x))
+    {
+        ret = 2147483647;
+    }
+    else
+#endif // !HAVE_COMPATIBLE_ILOGBNAN
+
+    {
+        ret = ilogbf(x);
+    }
+
+    LOGEXIT("ilogbf returns int %d\n", ret);
+    PERF_EXIT(ilogbf);
+    return ret;
+}
+
+/*++
+Function:
     logf
 
 See MSDN.
@@ -775,6 +850,25 @@ PALIMPORT float __cdecl PAL_logf(float x)
 
     LOGEXIT("logf returns float %f\n", ret);
     PERF_EXIT(logf);
+    return ret;
+}
+
+/*++
+Function:
+    log2f
+
+See MSDN.
+--*/
+PALIMPORT float __cdecl PAL_log2f(float x)
+{
+    float ret;
+    PERF_ENTRY(log2f);
+    ENTRY("log2f (x=%f)\n", x);
+
+    ret = log2f(x);
+
+    LOGEXIT("log2f returns float %f\n", ret);
+    PERF_EXIT(log2f);
     return ret;
 }
 
@@ -892,5 +986,24 @@ PALIMPORT float __cdecl PAL_powf(float x, float y)
 
     LOGEXIT("powf returns float %f\n", ret);
     PERF_EXIT(powf);
+    return ret;
+}
+
+/*++
+Function:
+    scalbnf
+
+See MSDN.
+--*/
+PALIMPORT float __cdecl PAL_scalbnf(float x, int n)
+{
+    float ret;
+    PERF_ENTRY(scalbnf);
+    ENTRY("scalbnf (x=%f, n=%d)\n", x, n);
+
+    ret = scalbnf(x, n);
+
+    LOGEXIT("scalbnf returns double %f\n", ret);
+    PERF_EXIT(scalbnf);
     return ret;
 }

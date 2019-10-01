@@ -23,7 +23,6 @@ void ThreadLocalBlock::FreeTLM(SIZE_T i, BOOL isThreadShuttingdown)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -33,8 +32,7 @@ void ThreadLocalBlock::FreeTLM(SIZE_T i, BOOL isThreadShuttingdown)
     {
         SpinLock::Holder lock(&m_TLMTableLock);
 
-        _ASSERTE(m_pTLMTable != NULL);
-        if (i >= m_TLMTableSize)
+        if ((m_pTLMTable == NULL) || (i >= m_TLMTableSize))
         {
             return;
         }
@@ -82,7 +80,6 @@ void ThreadLocalBlock::FreeTable()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -97,6 +94,8 @@ void ThreadLocalBlock::FreeTable()
                 FreeTLM(i, TRUE /* isThreadShuttingDown */);
             }
         }
+
+        SpinLock::Holder lock(&m_TLMTableLock);
 
         // Free the table itself
         delete m_pTLMTable;
@@ -242,7 +241,6 @@ DWORD ThreadLocalModule::GetClassFlags(MethodTable* pMT, DWORD iClassIndex) // i
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     if (pMT->IsDynamicStatics())
@@ -287,7 +285,6 @@ void ThreadLocalBlock::AddPinningHandleToList(OBJECTHANDLE oh)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -301,7 +298,6 @@ void ThreadLocalBlock::FreePinningHandles()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -427,7 +423,7 @@ void ThreadLocalBlock::AllocateThreadStaticBoxes(MethodTable * pMT)
             PTR_BYTE pStaticBase = pMT->GetGCThreadStaticsBasePointer();
             _ASSERTE(pStaticBase != NULL);
 
-            SetObjectReference( (OBJECTREF*)(pStaticBase + pField->GetOffset()), obj, GetAppDomain() );
+            SetObjectReference( (OBJECTREF*)(pStaticBase + pField->GetOffset()), obj );
 
             // If we created a pinning handle, save it to the list
             if (handle != NULL)
@@ -581,9 +577,7 @@ void    ThreadLocalModule::AllocateDynamicClass(MethodTable *pMT)
         {
             if (!pMT->Collectible())
             {
-                PTR_ThreadLocalBlock pThreadLocalBlock = GetThread()->m_pThreadLocalBlock;
-                _ASSERTE(pThreadLocalBlock != NULL);
-                pThreadLocalBlock->AllocateStaticFieldObjRefPtrs(dwNumHandleStatics,
+                GetThread()->m_ThreadLocalBlock.AllocateStaticFieldObjRefPtrs(dwNumHandleStatics,
                         &((NormalDynamicEntry *)pDynamicStatics)->m_pGCStatics);
             }
             else
@@ -653,7 +647,7 @@ PTR_ThreadLocalModule ThreadStatics::AllocateAndInitTLM(ModuleIndex index, PTR_T
     _ASSERTE(pThreadLocalBlock != NULL);
     _ASSERTE(pModule != NULL);
 
-    NewHolder<ThreadLocalModule> pThreadLocalModule = AllocateTLM(pModule);
+    NewArrayHolder<ThreadLocalModule> pThreadLocalModule = AllocateTLM(pModule);
 
     pThreadLocalBlock->AllocateThreadStaticHandles(pModule, pThreadLocalModule);
 
@@ -695,25 +689,6 @@ PTR_ThreadLocalModule ThreadStatics::GetTLM(MethodTable * pMT) //static
 {
     Module * pModule = pMT->GetModuleForStatics();
     return GetTLM(pModule->GetModuleIndex(), pModule);
-}
-
-PTR_ThreadLocalBlock ThreadStatics::AllocateTLB(PTR_Thread pThread) //static
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-    _ASSERTE(pThread->m_pThreadLocalBlock == NULL);
-
-    // Allocate a new TLB and update this Thread's pointer to the current 
-    // ThreadLocalBlock. Constructor zeroes out everything for us.
-    pThread->m_pThreadLocalBlock = new ThreadLocalBlock();
-
-    return pThread->m_pThreadLocalBlock;
 }
 
 PTR_ThreadLocalModule ThreadStatics::AllocateTLM(Module * pModule)

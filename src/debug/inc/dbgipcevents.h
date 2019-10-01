@@ -179,7 +179,7 @@ struct MSLAYOUT DebuggerIPCRuntimeOffsets
 // aren't any embedded buffers in the DebuggerIPCControlBlock).
 
 #if defined(DBG_TARGET_X86) || defined(DBG_TARGET_ARM)
-#ifdef _WIN64
+#ifdef BIT64
 #define CorDBIPC_BUFFER_SIZE 2104
 #else
 #define CorDBIPC_BUFFER_SIZE 2092
@@ -220,11 +220,11 @@ struct MSLAYOUT DebuggerIPCControlBlock
     HRESULT                    m_errorHR;
     unsigned int               m_errorCode;
 
-#if defined(DBG_TARGET_WIN64)
+#if defined(DBG_TARGET_64BIT)
     // 64-bit needs this padding to make the handles after this aligned.
     // But x86 can't have this padding b/c it breaks binary compatibility between v1.1 and v2.0.
     ULONG padding4;
-#endif // DBG_TARGET_WIN64
+#endif // DBG_TARGET_64BIT
 
 
     RemoteHANDLE               m_rightSideEventAvailable;
@@ -320,11 +320,11 @@ struct MSLAYOUT DebuggerIPCControlBlockTransport
     HRESULT                    m_errorHR;
     unsigned int               m_errorCode;
 
-#if defined(DBG_TARGET_WIN64)
+#if defined(DBG_TARGET_64BIT)
     // 64-bit needs this padding to make the handles after this aligned.
     // But x86 can't have this padding b/c it breaks binary compatibility between v1.1 and v2.0.
     ULONG padding4;
-#endif // DBG_TARGET_WIN64
+#endif // DBG_TARGET_64BIT
 
     // This is set immediately when the helper thread is created.
     // This will be set even if there's a temporary helper thread or if the real helper
@@ -639,6 +639,7 @@ DEFINE_LSPTR_TYPE(class DebuggerJitInfo, LSPTR_DJI);
 DEFINE_LSPTR_TYPE(class DebuggerMethodInfo, LSPTR_DMI);
 DEFINE_LSPTR_TYPE(class MethodDesc,         LSPTR_METHODDESC);
 DEFINE_LSPTR_TYPE(class DebuggerBreakpoint, LSPTR_BREAKPOINT);
+DEFINE_LSPTR_TYPE(class DebuggerDataBreakpoint, LSPTR_DATA_BREAKPOINT);
 DEFINE_LSPTR_TYPE(class DebuggerEval,       LSPTR_DEBUGGEREVAL);
 DEFINE_LSPTR_TYPE(class DebuggerStepper,    LSPTR_STEPPER);
 
@@ -1002,7 +1003,7 @@ const size_t nameCount = sizeof(DbgIPCEventTypeNames) / sizeof(DbgIPCEventTypeNa
 
 struct MSLAYOUT IPCENames // We use a class/struct so that the function can remain in a shared header file
 {
-    static const DebuggerIPCEventType GetEventType(__in_z char * strEventType)
+    static DebuggerIPCEventType GetEventType(__in_z char * strEventType)
     {
         // pass in the string of event name and find the matching enum value
         // This is a linear search which is pretty slow. However, this is only used
@@ -1171,9 +1172,9 @@ struct MSLAYOUT DebuggerREGDISPLAY
     #define DebuggerIPCE_FloatCount 32
 
     SIZE_T  X[29];
-    SIZE_T  SP;
     SIZE_T  FP;
     SIZE_T  LR;
+    SIZE_T  SP;
     SIZE_T  PC;
 #else
     #define DebuggerIPCE_FloatCount 1
@@ -1358,11 +1359,11 @@ struct MSLAYOUT DebuggerIPCE_JITFuncData
     LSPTR_DJI   nativeCodeJITInfoToken;
     VMPTR_MethodDesc vmNativeCodeMethodDescToken;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
     BOOL         fIsFilterFrame;
     SIZE_T       parentNativeOffset;
     FramePointer fpParentOrSelf;
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
     // indicates if the MethodDesc is a generic function or a method inside a generic class (or
     // both!).
@@ -2011,6 +2012,15 @@ struct MSLAYOUT DebuggerIPCEvent
 
         struct MSLAYOUT
         {
+#ifdef FEATURE_DATABREAKPOINT
+            CONTEXT context;
+#else
+            int dummy;
+#endif
+        } DataBreakpointData;
+
+        struct MSLAYOUT
+        {
             LSPTR_STEPPER        stepperToken;
             VMPTR_Thread         vmThreadToken;
             FramePointer         frameToken;
@@ -2343,7 +2353,6 @@ struct MSLAYOUT DebuggerIPCEvent
             void * pMetadataStart;
             ULONG nMetadataSize;
         } MetadataUpdateRequest;
-
     };
 };
 

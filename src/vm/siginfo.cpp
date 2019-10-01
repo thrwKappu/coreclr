@@ -321,6 +321,7 @@ void SigPointer::ConvertToInternalExactlyOne(Module* pSigModule, SigTypeContext 
                     mdToken tk;
                     IfFailThrowBF(GetToken(&tk), BFA_BAD_COMPLUS_SIG, pSigModule);
                     TypeHandle th = ClassLoader::LoadTypeDefOrRefThrowing(pSigModule, tk);                    
+                    pSigBuilder->AppendElementType(ELEMENT_TYPE_INTERNAL);
                     pSigBuilder->AppendPointer(th.AsPtr());
                     
                     ConvertToInternalExactlyOne(pSigModule, pTypeContext, pSigBuilder, bSkipCustomModifier);
@@ -1090,9 +1091,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
     }
     else
     {
-        // This function is recursive, so it must have an interior probe
-        INTERIOR_STACK_PROBE_FOR_NOTHROW_CHECK_THREAD(10, NO_FORBIDGC_LOADER_USE_ThrowSO(););
-
 #ifdef _DEBUG_IMPL
         // This verifies that we won't try and load a type
         // if FORBIDGC_LOADER_USE_ENABLED is true.
@@ -1127,7 +1125,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
             break;
         }
 
-#ifdef FEATURE_PREJIT
         case ELEMENT_TYPE_NATIVE_ARRAY_TEMPLATE_ZAPSIG:
         {
 #ifndef DACCESS_COMPILE
@@ -1260,7 +1257,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
 #endif
             break;
         }
-#endif // FEATURE_PREJIT
 
         case ELEMENT_TYPE_VAR:
         {
@@ -1351,10 +1347,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
             if (!ClrSafeInt<DWORD>::multiply(ntypars, sizeof(TypeHandle), dwAllocaSize))
                 ThrowHR(COR_E_OVERFLOW);
 
-            if ((dwAllocaSize/GetOsPageSize()+1) >= 2)
-            {
-                DO_INTERIOR_STACK_PROBE_FOR_NOTHROW_CHECK_THREAD((10+dwAllocaSize/GetOsPageSize()+1), NO_FORBIDGC_LOADER_USE_ThrowSO(););
-            }
             TypeHandle *thisinst = (TypeHandle*) _alloca(dwAllocaSize);
 
             // Finally we gather up the type arguments themselves, loading at the level specified for generic arguments
@@ -1631,11 +1623,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                 {
                     ThrowHR(COR_E_OVERFLOW);
                 }
-                
-                if ((cAllocaSize/GetOsPageSize()+1) >= 2)
-                {
-                    DO_INTERIOR_STACK_PROBE_FOR_NOTHROW_CHECK_THREAD((10+cAllocaSize/GetOsPageSize()+1), NO_FORBIDGC_LOADER_USE_ThrowSO(););
-                }
 
                 TypeHandle *retAndArgTypes = (TypeHandle*) _alloca(cAllocaSize);
                 bool fReturnTypeOrParameterNotLoaded = false;
@@ -1711,7 +1698,6 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                 THROW_BAD_FORMAT(BFA_BAD_COMPLUS_SIG, pOrigModule);
     }
 
-    END_INTERIOR_STACK_PROBE;
     }
     
     RETURN thRet;
@@ -2389,7 +2375,6 @@ CorElementType SigPointer::PeekElemTypeNormalized(Module* pModule, const SigType
         if (FORBIDGC_LOADER_USE_ENABLED()) GC_NOTRIGGER; else GC_TRIGGERS;
         if (FORBIDGC_LOADER_USE_ENABLED()) FORBID_FAULT; else { INJECT_FAULT(COMPlusThrowOM()); }
         MODE_ANY;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -2399,7 +2384,6 @@ CorElementType SigPointer::PeekElemTypeNormalized(Module* pModule, const SigType
 
     if (type == ELEMENT_TYPE_VALUETYPE)
     {
-        BEGIN_SO_INTOLERANT_CODE(GetThread());
         {
             // Everett C++ compiler can generate a TypeRef with RS=0
             // without respective TypeDef for unmanaged valuetypes,
@@ -2416,7 +2400,6 @@ CorElementType SigPointer::PeekElemTypeNormalized(Module* pModule, const SigType
             if (pthValueType != NULL)
                 *pthValueType = th;
         }
-        END_SO_INTOLERANT_CODE;
     }
 
     return(type);
@@ -2436,7 +2419,6 @@ SigPointer::PeekElemTypeClosed(
         GC_NOTRIGGER;
         FORBID_FAULT;
         MODE_ANY;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -2522,7 +2504,6 @@ mdTypeRef SigPointer::PeekValueTypeTokenClosed(Module *pModule, const SigTypeCon
         PRECONDITION(PeekElemTypeClosed(NULL, pTypeContext) == ELEMENT_TYPE_VALUETYPE);
         FORBID_FAULT;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -2762,9 +2743,9 @@ HRESULT TypeIdentifierData::Init(Module *pModule, mdToken tk)
     ULONG cbData;
     const BYTE *pData;
 
-    IfFailRet(pInternalImport->GetCustomAttributeByName(
+    IfFailRet(pModule->GetCustomAttribute(
         tk, 
-        g_TypeIdentifierAttributeClassName,
+        WellKnownAttribute::TypeIdentifier,
         (const void **)&pData, 
         &cbData));
     
@@ -2795,7 +2776,11 @@ HRESULT TypeIdentifierData::Init(Module *pModule, mdToken tk)
     else
     {
         // no TypeIdentifierAttribute -> the assembly must be a type library
-        bool has_eq = !pModule->GetAssembly()->IsDynamic() && pModule->GetAssembly()->IsPIAOrImportedFromTypeLib();
+        bool has_eq = !pModule->GetAssembly()->IsDynamic();
+
+#ifdef FEATURE_COMINTEROP
+        has_eq = has_eq && pModule->GetAssembly()->IsPIAOrImportedFromTypeLib();
+#endif // FEATURE_COMINTEROP
 
         if (!has_eq)
         {
@@ -2810,13 +2795,12 @@ HRESULT TypeIdentifierData::Init(Module *pModule, mdToken tk)
         if (IsTdInterface(dwAttrType) && IsTdImport(dwAttrType))
         {
             // ComImport interfaces get scope from their GUID
-            hr = pInternalImport->GetCustomAttributeByName(tk, INTEROP_GUID_TYPE, (const void **)&pData, &cbData);
+            hr = pModule->GetCustomAttribute(tk, WellKnownAttribute::Guid, (const void **)&pData, &cbData);
         }
         else
         {
             // other equivalent types get it from the declaring assembly
-            IMDInternalImport *pAssemblyImport = pModule->GetAssembly()->GetManifestImport();
-            hr = pAssemblyImport->GetCustomAttributeByName(TokenFromRid(1, mdtAssembly), INTEROP_GUID_TYPE, (const void **)&pData, &cbData);
+            hr = pModule->GetCustomAttribute(TokenFromRid(1, mdtAssembly), WellKnownAttribute::Guid, (const void **)&pData, &cbData);
         }
 
         if (hr != S_OK)
@@ -2898,33 +2882,6 @@ BOOL TypeIdentifierData::IsEqual(const TypeIdentifierData & data) const
     return (memcmp(m_pchIdentifierNamespace, data.m_pchIdentifierName, m_cbIdentifierNamespace) == 0) &&
            (data.m_pchIdentifierName[m_cbIdentifierNamespace] == NAMESPACE_SEPARATOR_CHAR) &&
            (memcmp(m_pchIdentifierName, data.m_pchIdentifierName + m_cbIdentifierNamespace + 1, m_cbIdentifierName) == 0);
-}
-
-#endif //FEATURE_TYPEEQUIVALENCE
-#ifdef FEATURE_COMINTEROP
-
-//---------------------------------------------------------------------------------------
-// 
-static CorElementType GetFieldSigElementType(PCCOR_SIGNATURE pSig, DWORD cbSig)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    }
-    CONTRACTL_END
-
-    SigPointer sigptr(pSig, cbSig);
-    
-    ULONG data;
-    IfFailThrow(sigptr.GetCallingConv(&data));
-    _ASSERTE(data == IMAGE_CEE_CS_CALLCONV_FIELD);
-
-    CorElementType etype;
-    IfFailThrow(sigptr.GetElemType(&etype));
-
-    return etype;
 }
 
 //---------------------------------------------------------------------------------------
@@ -3073,7 +3030,7 @@ static BOOL CompareDelegatesForEquivalence(mdToken tk1, mdToken tk2, Module *pMo
     return MetaSig::CompareMethodSigs(pSig1, cbSig1, pModule1, NULL, pSig2, cbSig2, pModule2, NULL, pVisited);
 }
 
-#endif // FEATURE_COMINTEROP
+#endif // FEATURE_TYPEEQUIVALENCE
 #endif // #ifndef DACCESS_COMPILE
 
 #ifndef DACCESS_COMPILE
@@ -3086,7 +3043,6 @@ BOOL IsTypeDefExternallyVisible(mdToken tk, Module *pModule, DWORD dwAttrClass)
         NOTHROW;
         MODE_ANY;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
@@ -3172,13 +3128,18 @@ BOOL IsTypeDefEquivalent(mdToken tk, Module *pModule)
     }
 
     // Check for the TypeIdentifierAttribute and auto opt-in
-    HRESULT hr = pInternalImport->GetCustomAttributeByName(tk, g_TypeIdentifierAttributeClassName, NULL, NULL);
+    HRESULT hr = pModule->GetCustomAttribute(tk, WellKnownAttribute::TypeIdentifier, NULL, NULL);
     IfFailThrow(hr);
 
     // 1. Type is within assembly marked with ImportedFromTypeLibAttribute or PrimaryInteropAssemblyAttribute
     if (hr != S_OK)
     {
-        bool has_eq = !pModule->GetAssembly()->IsDynamic() && pModule->GetAssembly()->IsPIAOrImportedFromTypeLib();
+        // no TypeIdentifierAttribute -> the assembly must be a type library
+        bool has_eq = !pModule->GetAssembly()->IsDynamic();
+
+#ifdef FEATURE_COMINTEROP
+        has_eq = has_eq && pModule->GetAssembly()->IsPIAOrImportedFromTypeLib();
+#endif // FEATURE_COMINTEROP
 
         if (!has_eq)
             return FALSE;
@@ -3208,7 +3169,7 @@ BOOL IsTypeDefEquivalent(mdToken tk, Module *pModule)
         else
         {
             // COMEvent
-            hr = pInternalImport->GetCustomAttributeByName(tk, INTEROP_COMEVENTINTERFACE_TYPE, NULL, NULL);
+            hr = pModule->GetCustomAttribute(tk, WellKnownAttribute::ComEventInterface, NULL, NULL);
             IfFailThrow(hr);
 
             if (hr == S_OK)
@@ -3426,7 +3387,7 @@ BOOL CompareTypeDefsForEquivalence(mdToken tk1, mdToken tk2, Module *pModule1, M
     }
     return TRUE;
 
-#else //!defined(DACCESS_COMPILE) && defined(FEATURE_COMINTEROP)
+#else //!defined(DACCESS_COMPILE) && defined(FEATURE_TYPEEQUIVALENCE)
 
 #ifdef DACCESS_COMPILE
     // We shouldn't execute this code in dac builds.
@@ -4907,7 +4868,7 @@ void PromoteCarefully(promote_func   fn,
     //
     // Sanity check that the flags contain only these three values
     //
-    assert((flags & ~(GC_CALL_INTERIOR|GC_CALL_PINNED|GC_CALL_CHECK_APP_DOMAIN)) == 0);
+    assert((flags & ~(GC_CALL_INTERIOR|GC_CALL_PINNED)) == 0);
 
     //
     // Sanity check that GC_CALL_INTERIOR FLAG is set
@@ -5046,7 +5007,7 @@ VOID MetaSig::GcScanRoots(ArgDestination *pValue,
 #ifdef _DEBUG
             pOldLocation = *pArgPtr;
 #endif
-            (*fn)(pArgPtr, sc, GC_CALL_CHECK_APP_DOMAIN );
+            (*fn)(pArgPtr, sc, 0 );
 
             // !!! Do not cast to (OBJECTREF*)
             // !!! If we are in the relocate phase, we may have updated root,
@@ -5074,7 +5035,7 @@ VOID MetaSig::GcScanRoots(ArgDestination *pValue,
             pOldLocation = *pArgPtr;
 #endif
 
-            (*fnc)(fn, pArgPtr, sc, GC_CALL_INTERIOR|GC_CALL_CHECK_APP_DOMAIN);
+            (*fnc)(fn, pArgPtr, sc, GC_CALL_INTERIOR);
 
             // !!! Do not cast to (OBJECTREF*)
             // !!! If we are in the relocate phase, we may have updated root,

@@ -1,3 +1,19 @@
+# Set initial flags for each configuration
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# All code we build should be compiled as position independent
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+set(CLR_DEFINES_DEBUG_INIT              DEBUG _DEBUG _DBG URTBLDENV_FRIENDLY=Checked BUILDENV_CHECKED=1)
+set(CLR_DEFINES_CHECKED_INIT            DEBUG _DEBUG _DBG URTBLDENV_FRIENDLY=Checked BUILDENV_CHECKED=1)
+set(CLR_DEFINES_RELEASE_INIT            NDEBUG URTBLDENV_FRIENDLY=Retail)
+set(CLR_DEFINES_RELWITHDEBINFO_INIT     NDEBUG URTBLDENV_FRIENDLY=Retail)
+
 #----------------------------------------
 # Detect and set platform variable names
 #     - for non-windows build platform & architecture is detected using inbuilt CMAKE variables and cross target component configure
@@ -45,15 +61,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL Linux)
 
     # Detect Linux ID
     if(DEFINED CLR_CMAKE_LINUX_ID)
-        if(CLR_CMAKE_LINUX_ID STREQUAL ubuntu)
-            set(CLR_CMAKE_TARGET_UBUNTU_LINUX 1)
-        elseif(CLR_CMAKE_LINUX_ID STREQUAL tizen)
+        if(CLR_CMAKE_LINUX_ID STREQUAL tizen)
             set(CLR_CMAKE_TARGET_TIZEN_LINUX 1)
         elseif(CLR_CMAKE_LINUX_ID STREQUAL alpine)
             set(CLR_CMAKE_PLATFORM_ALPINE_LINUX 1)
-        endif()
-        if(CLR_CMAKE_LINUX_ID STREQUAL ubuntu)
-            set(CLR_CMAKE_PLATFORM_UBUNTU_LINUX 1)
         endif()
     endif(DEFINED CLR_CMAKE_LINUX_ID)
 endif(CMAKE_SYSTEM_NAME STREQUAL Linux)
@@ -62,11 +73,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL Darwin)
   set(CLR_CMAKE_PLATFORM_UNIX 1)
   set(CLR_CMAKE_PLATFORM_UNIX_AMD64 1)
   set(CLR_CMAKE_PLATFORM_DARWIN 1)
-  if(CMAKE_VERSION VERSION_LESS "3.4.0")
-    set(CMAKE_ASM_COMPILE_OBJECT "${CMAKE_C_COMPILER} <FLAGS> <DEFINES> -o <OBJECT> -c <SOURCE>")
-  else()
-    set(CMAKE_ASM_COMPILE_OBJECT "${CMAKE_C_COMPILER} <FLAGS> <DEFINES> <INCLUDES> -o <OBJECT> -c <SOURCE>")
-  endif(CMAKE_VERSION VERSION_LESS "3.4.0")
+  set(CMAKE_ASM_COMPILE_OBJECT "${CMAKE_C_COMPILER} <FLAGS> <DEFINES> <INCLUDES> -o <OBJECT> -c <SOURCE>")
 endif(CMAKE_SYSTEM_NAME STREQUAL Darwin)
 
 if(CMAKE_SYSTEM_NAME STREQUAL FreeBSD)
@@ -101,6 +108,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL SunOS)
   endif()
   set(CLR_CMAKE_PLATFORM_SUNOS 1)
 endif(CMAKE_SYSTEM_NAME STREQUAL SunOS)
+
+# "configureoptimization.cmake" must be included after CLR_CMAKE_PLATFORM_UNIX has been set.
+include(${CMAKE_CURRENT_LIST_DIR}/configureoptimization.cmake)
 
 #--------------------------------------------
 # This repo builds two set of binaries
@@ -174,12 +184,24 @@ endif()
 # Initialize Cmake compiler flags and other variables
 #-----------------------------------------------------
 
+if(WIN32)
+    add_compile_options(/Zi /FC /Zc:strictStrings)
+elseif (CLR_CMAKE_PLATFORM_UNIX)
+    add_compile_options(-g)
+    add_compile_options(-Wall)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_options(-Wno-null-conversion)
+    else()
+        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Werror=conversion-null>)
+    endif()
+endif()
+
 if (CMAKE_CONFIGURATION_TYPES) # multi-configuration generator?
     set(CMAKE_CONFIGURATION_TYPES "Debug;Checked;Release;RelWithDebInfo" CACHE STRING "" FORCE)
 endif (CMAKE_CONFIGURATION_TYPES)
 
-set(CMAKE_C_FLAGS_CHECKED ${CLR_C_FLAGS_CHECKED_INIT} CACHE STRING "Flags used by the compiler during checked builds.")
-set(CMAKE_CXX_FLAGS_CHECKED ${CLR_CXX_FLAGS_CHECKED_INIT} CACHE STRING "Flags used by the compiler during checked builds.")
+set(CMAKE_C_FLAGS_CHECKED "")
+set(CMAKE_CXX_FLAGS_CHECKED "")
 set(CMAKE_EXE_LINKER_FLAGS_CHECKED "")
 set(CMAKE_SHARED_LINKER_FLAGS_CHECKED "")
 
@@ -221,12 +243,6 @@ if (WIN32)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG /PDBCOMPRESS")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /STACK:1572864")
 
-  # Temporarily disable incremental link due to incremental linking CFG bug crashing crossgen. 
-  # See https://github.com/dotnet/coreclr/issues/12592
-  # This has been fixed in VS 2017 Update 5 but we're keeping this around until everyone is off
-  # the versions that have the bug. The bug manifests itself as a bad crash.
-  set(NO_INCREMENTAL_LINKER_FLAGS "/INCREMENTAL:NO")  
-
   # Debug build specific flags
   set(CMAKE_SHARED_LINKER_FLAGS_DEBUG "/NOVCFEATURE ${NO_INCREMENTAL_LINKER_FLAGS}")
   set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${NO_INCREMENTAL_LINKER_FLAGS}")
@@ -263,7 +279,7 @@ elseif (CLR_CMAKE_PLATFORM_UNIX)
   # set the different configuration defines.
   if (UPPERCASE_CMAKE_BUILD_TYPE STREQUAL DEBUG)
     # First DEBUG
-    set_property(DIRECTORY  PROPERTY COMPILE_DEFINITIONS ${CLR_DEFINES_DEBUG_INIT})
+    set_property(DIRECTORY PROPERTY COMPILE_DEFINITIONS ${CLR_DEFINES_DEBUG_INIT})
   elseif (UPPERCASE_CMAKE_BUILD_TYPE STREQUAL CHECKED)
     # Then CHECKED
     set_property(DIRECTORY PROPERTY COMPILE_DEFINITIONS ${CLR_DEFINES_CHECKED_INIT})
@@ -299,10 +315,9 @@ elseif (CLR_CMAKE_PLATFORM_UNIX)
       endif ()
 
       # -fdata-sections -ffunction-sections: each function has own section instead of one per .o file (needed for --gc-sections)
-      # -fPIC: enable Position Independent Code normally just for shared libraries but required when linking with address sanitizer
       # -O1: optimization level used instead of -O0 to avoid compile error "invalid operand for inline asm constraint"
-      set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CLR_SANITIZE_CXX_FLAGS} -fdata-sections -ffunction-sections -fPIC -O1")
-      set(CMAKE_CXX_FLAGS_CHECKED "${CMAKE_CXX_FLAGS_CHECKED} ${CLR_SANITIZE_CXX_FLAGS} -fdata-sections -ffunction-sections -fPIC -O1")
+      set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CLR_SANITIZE_CXX_FLAGS} -fdata-sections -ffunction-sections  -O1")
+      set(CMAKE_CXX_FLAGS_CHECKED "${CMAKE_CXX_FLAGS_CHECKED} ${CLR_SANITIZE_CXX_FLAGS} -fdata-sections -ffunction-sections  -O1")
 
       set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${CLR_SANITIZE_LINK_FLAGS}")
       set(CMAKE_EXE_LINKER_FLAGS_CHECKED "${CMAKE_EXE_LINKER_FLAGS_CHECKED} ${CLR_SANITIZE_LINK_FLAGS}")
@@ -312,6 +327,11 @@ elseif (CLR_CMAKE_PLATFORM_UNIX)
       set(CMAKE_SHARED_LINKER_FLAGS_CHECKED "${CMAKE_SHARED_LINKER_FLAGS_CHECKED} ${CLR_SANITIZE_LINK_FLAGS} -Wl,--gc-sections")
     endif ()
   endif(UPPERCASE_CMAKE_BUILD_TYPE STREQUAL DEBUG OR UPPERCASE_CMAKE_BUILD_TYPE STREQUAL CHECKED)
+
+  # This linker option causes executables we build to be marked as containing position independent code.
+  # It is necessary to make ASLR work for executables.
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie" )
+
 endif(WIN32)
 
 # CLR_ADDITIONAL_LINKER_FLAGS - used for passing additional arguments to linker
@@ -323,7 +343,6 @@ endif(WIN32)
 if(CLR_CMAKE_PLATFORM_UNIX)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${CLR_ADDITIONAL_LINKER_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${CLR_ADDITIONAL_LINKER_FLAGS}" )
-    add_compile_options(${CLR_ADDITIONAL_COMPILER_OPTIONS})
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 if(CLR_CMAKE_PLATFORM_LINUX)
@@ -331,15 +350,19 @@ if(CLR_CMAKE_PLATFORM_LINUX)
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--build-id=sha1")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--build-id=sha1")
 endif(CLR_CMAKE_PLATFORM_LINUX)
+if(CLR_CMAKE_PLATFORM_FREEBSD)
+  set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -Wa,--noexecstack")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=lld -Xlinker --build-id=sha1")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld -Xlinker --build-id=sha1")
+endif(CLR_CMAKE_PLATFORM_FREEBSD)
 
 #------------------------------------
 # Definitions (for platform)
 #-----------------------------------
 if (CLR_CMAKE_PLATFORM_ARCH_AMD64)
   add_definitions(-D_AMD64_)
-  add_definitions(-D_WIN64)
   add_definitions(-DAMD64)
-  add_definitions(-DBIT64=1)
+  add_definitions(-DBIT64)
 elseif (CLR_CMAKE_PLATFORM_ARCH_I386)
   add_definitions(-D_X86_)
 elseif (CLR_CMAKE_PLATFORM_ARCH_ARM)
@@ -348,8 +371,7 @@ elseif (CLR_CMAKE_PLATFORM_ARCH_ARM)
 elseif (CLR_CMAKE_PLATFORM_ARCH_ARM64)
   add_definitions(-D_ARM64_)
   add_definitions(-DARM64)
-  add_definitions(-D_WIN64)
-  add_definitions(-DBIT64=1)
+  add_definitions(-DBIT64)
 else ()
   clr_unknown_arch()
 endif ()
@@ -375,7 +397,7 @@ if (CLR_CMAKE_PLATFORM_UNIX)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 if (CLR_CMAKE_PLATFORM_UNIX)
-  add_definitions(-DPLATFORM_UNIX=1)
+  add_definitions(-DPLATFORM_UNIX)
 
   if(CLR_CMAKE_PLATFORM_DARWIN)
     message("Detected OSX x86_64")
@@ -391,6 +413,8 @@ if (CLR_CMAKE_PLATFORM_UNIX)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 if (WIN32)
+  add_definitions(-DPLATFORM_WINDOWS)
+
   # Define the CRT lib references that link into Desktop imports
   set(STATIC_MT_CRT_LIB  "libcmt$<$<OR:$<CONFIG:Debug>,$<CONFIG:Checked>>:d>.lib")
   set(STATIC_MT_VCRT_LIB  "libvcruntime$<$<OR:$<CONFIG:Debug>,$<CONFIG:Checked>>:d>.lib")
@@ -433,43 +457,74 @@ if (CLR_CMAKE_PLATFORM_UNIX)
     add_compile_options(-fstack-protector-strong)
   endif(CLR_CMAKE_PLATFORM_DARWIN)
 
+  # Contracts are disabled on UNIX.
   add_definitions(-DDISABLE_CONTRACTS)
-  # The -ferror-limit is helpful during the porting, it makes sure the compiler doesn't stop
-  # after hitting just about 20 errors.
-  add_compile_options(-ferror-limit=4096)
 
   if (CLR_CMAKE_WARNINGS_ARE_ERRORS)
     # All warnings that are not explicitly disabled are reported as errors
     add_compile_options(-Werror)
   endif(CLR_CMAKE_WARNINGS_ARE_ERRORS)
 
-  # Disabled warnings
-  add_compile_options(-Wno-unused-private-field)
+  # Disabled common warnings
   add_compile_options(-Wno-unused-variable)
-  # Explicit constructor calls are not supported by clang (this->ClassName::ClassName())
-  add_compile_options(-Wno-microsoft)
-  # This warning is caused by comparing 'this' to NULL
-  add_compile_options(-Wno-tautological-compare)
-  # There are constants of type BOOL used in a condition. But BOOL is defined as int
-  # and so the compiler thinks that there is a mistake.
-  add_compile_options(-Wno-constant-logical-operand)
-  # We use pshpack1/2/4/8.h and poppack.h headers to set and restore packing. However
-  # clang 6.0 complains when the packing change lifetime is not contained within 
-  # a header file.
-  add_compile_options(-Wno-pragma-pack)
-
-  add_compile_options(-Wno-unknown-warning-option)
+  add_compile_options(-Wno-unused-value)
+  add_compile_options(-Wno-unused-function)
 
   #These seem to indicate real issues
-  add_compile_options(-Wno-invalid-offsetof)
-  # The following warning indicates that an attribute __attribute__((__ms_struct__)) was applied
-  # to a struct or a class that has virtual members or a base class. In that case, clang
-  # may not generate the same object layout as MSVC.
-  add_compile_options(-Wno-incompatible-ms-struct)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-invalid-offsetof>)
+
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # The -ferror-limit is helpful during the porting, it makes sure the compiler doesn't stop
+    # after hitting just about 20 errors.
+    add_compile_options(-ferror-limit=4096)
+
+    # Disabled warnings
+    add_compile_options(-Wno-unused-private-field)
+    # Explicit constructor calls are not supported by clang (this->ClassName::ClassName())
+    add_compile_options(-Wno-microsoft)
+    # This warning is caused by comparing 'this' to NULL
+    add_compile_options(-Wno-tautological-compare)
+    # There are constants of type BOOL used in a condition. But BOOL is defined as int
+    # and so the compiler thinks that there is a mistake.
+    add_compile_options(-Wno-constant-logical-operand)
+    # We use pshpack1/2/4/8.h and poppack.h headers to set and restore packing. However
+    # clang 6.0 complains when the packing change lifetime is not contained within
+    # a header file.
+    add_compile_options(-Wno-pragma-pack)
+
+    add_compile_options(-Wno-unknown-warning-option)
+
+    # The following warning indicates that an attribute __attribute__((__ms_struct__)) was applied
+    # to a struct or a class that has virtual members or a base class. In that case, clang
+    # may not generate the same object layout as MSVC.
+    add_compile_options(-Wno-incompatible-ms-struct)
+  else()
+    add_compile_options(-Wno-unused-variable)
+    add_compile_options(-Wno-unused-but-set-variable)
+    add_compile_options(-fms-extensions)
+    add_compile_options(-Wno-unknown-pragmas)
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
+      add_compile_options(-Wno-nonnull-compare)
+    endif()
+    if (COMPILER_SUPPORTS_F_ALIGNED_NEW)
+      add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-faligned-new>)
+    endif()
+  endif()
 
   # Some architectures (e.g., ARM) assume char type is unsigned while CoreCLR assumes char is signed
   # as x64 does. It has been causing issues in ARM (https://github.com/dotnet/coreclr/issues/4746)
   add_compile_options(-fsigned-char)
+
+  # We mark the function which needs exporting with DLLEXPORT
+  add_compile_options(-fvisibility=hidden)
+
+  # Specify the minimum supported version of macOS
+  if(CLR_CMAKE_PLATFORM_DARWIN)
+    set(MACOS_VERSION_MIN_FLAGS "-mmacosx-version-min=10.12")
+    add_compile_options("${MACOS_VERSION_MIN_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${MACOS_VERSION_MIN_FLAGS}")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${MACOS_VERSION_MIN_FLAGS}")
+  endif(CLR_CMAKE_PLATFORM_DARWIN)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 if(CLR_CMAKE_PLATFORM_UNIX_ARM)
@@ -483,6 +538,10 @@ if(CLR_CMAKE_PLATFORM_UNIX_ARM)
      add_compile_options(-mfloat-abi=softfp)
    endif(ARM_SOFTFP)
 endif(CLR_CMAKE_PLATFORM_UNIX_ARM)
+
+if(CLR_CMAKE_PLATFORM_UNIX)
+  add_compile_options(${CLR_ADDITIONAL_COMPILER_OPTIONS})
+endif(CLR_CMAKE_PLATFORM_UNIX)
 
 if (WIN32)
   # Compile options for targeting windows
@@ -528,19 +587,24 @@ if (WIN32)
   # enable control-flow-guard support for native components for non-Arm64 builds
   # Added using variables instead of add_compile_options to let individual projects override it
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /guard:cf")
-  set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} /guard:cf")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /guard:cf")
 
-  # Statically linked CRT (libcmt[d].lib, libvcruntime[d].lib and libucrt[d].lib) by default. This is done to avoid  
-  # linking in VCRUNTIME140.DLL for a simplified xcopy experience by reducing the dependency on VC REDIST.  
-  #  
-  # For Release builds, we shall dynamically link into uCRT [ucrtbase.dll] (which is pushed down as a Windows Update on downlevel OS) but  
-  # wont do the same for debug/checked builds since ucrtbased.dll is not redistributable and Debug/Checked builds are not  
-  # production-time scenarios.  
-  add_compile_options($<$<OR:$<CONFIG:Release>,$<CONFIG:Relwithdebinfo>>:/MT>)  
-  add_compile_options($<$<OR:$<CONFIG:Debug>,$<CONFIG:Checked>>:/MTd>)  
+  # Statically linked CRT (libcmt[d].lib, libvcruntime[d].lib and libucrt[d].lib) by default. This is done to avoid
+  # linking in VCRUNTIME140.DLL for a simplified xcopy experience by reducing the dependency on VC REDIST.
+  #
+  # For Release builds, we shall dynamically link into uCRT [ucrtbase.dll] (which is pushed down as a Windows Update on downlevel OS) but
+  # wont do the same for debug/checked builds since ucrtbased.dll is not redistributable and Debug/Checked builds are not
+  # production-time scenarios.
+  add_compile_options($<$<OR:$<CONFIG:Release>,$<CONFIG:Relwithdebinfo>>:/MT>)
+  add_compile_options($<$<OR:$<CONFIG:Debug>,$<CONFIG:Checked>>:/MTd>)
 
   set(CMAKE_ASM_MASM_FLAGS "${CMAKE_ASM_MASM_FLAGS} /ZH:SHA_256")
-  
+
+  if (CLR_CMAKE_TARGET_ARCH_ARM OR CLR_CMAKE_TARGET_ARCH_ARM64)
+    # Contracts work too slow on ARM/ARM64 DEBUG/CHECKED.
+    add_definitions(-DDISABLE_CONTRACTS)
+  endif (CLR_CMAKE_TARGET_ARCH_ARM OR CLR_CMAKE_TARGET_ARCH_ARM64)
+
 endif (WIN32)
 
 if(CLR_CMAKE_ENABLE_CODE_COVERAGE)

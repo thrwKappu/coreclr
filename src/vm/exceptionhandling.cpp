@@ -7,23 +7,19 @@
 
 #include "common.h"
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
 #include "exceptionhandling.h"
 #include "dbginterface.h"
 #include "asmconstants.h"
 #include "eetoprofinterfacewrapper.inl"
 #include "eedbginterfaceimpl.inl"
-#include "perfcounters.h"
 #include "eventtrace.h"
 #include "virtualcallstub.h"
+#include "utilcode.h"
 
 #if defined(_TARGET_X86_)
 #define USE_CURRENT_CONTEXT_IN_FILTER
 #endif // _TARGET_X86_
-
-#if defined(_TARGET_ARM_) || defined(_TARGET_X86_)
-#define VSD_STUB_CAN_THROW_AV
-#endif // _TARGET_ARM_ || _TARGET_X86_
 
 #if defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
 // ARM/ARM64 uses Caller-SP to locate PSPSym in the funclet frame.
@@ -42,7 +38,7 @@
 #endif // _TARGET_ARM_ || _TARGET_ARM64_ || _TARGET_X86_
 
 #ifndef FEATURE_PAL
-void __declspec(noinline)
+void NOINLINE
 ClrUnwindEx(EXCEPTION_RECORD* pExceptionRecord,
                  UINT_PTR          ReturnValue,
                  UINT_PTR          TargetIP,
@@ -128,6 +124,7 @@ static void DoEHLog(DWORD lvl, __in_z const char *fmt, ...);
 #endif
 
 TrackerAllocator    g_theTrackerAllocator;
+uint32_t            g_exceptionCount;
 
 bool FixNonvolatileRegisters(UINT_PTR  uOriginalSP,
                              Thread*   pThread,
@@ -197,16 +194,29 @@ void FreeTrackerMemory(ExceptionTracker* pTracker, TrackerMemoryType mem)
 static inline void UpdatePerformanceMetrics(CrawlFrame *pcfThisFrame, BOOL bIsRethrownException, BOOL bIsNewException)
 {
     WRAPPER_NO_CONTRACT;
-    COUNTER_ONLY(GetPerfCounters().m_Excep.cThrown++);
+    g_exceptionCount++;
 
     // Fire an exception thrown ETW event when an exception occurs
     ETW::ExceptionLog::ExceptionThrown(pcfThisFrame, bIsRethrownException, bIsNewException);
 }
 
-void ShutdownEEAndExitProcess()
+#ifdef FEATURE_PAL
+static LONG volatile g_termination_triggered = 0;
+
+void HandleTerminationRequest(int terminationExitCode)
 {
-    ForceEEShutdown(SCA_ExitProcessWhenShutdownComplete);
+    // We set a non-zero exit code to indicate the process didn't terminate cleanly.
+    // This value can be changed by the user by setting Environment.ExitCode in the
+    // ProcessExit event. We only start termination on the first SIGTERM signal
+    // to ensure we don't overwrite an exit code already set in ProcessExit.
+    if (InterlockedCompareExchange(&g_termination_triggered, 1, 0) == 0)
+    {
+        SetLatchedExitCode(terminationExitCode);
+
+        ForceEEShutdown(SCA_ExitProcessWhenShutdownComplete);
+    }
 }
+#endif
 
 void InitializeExceptionHandling()
 {
@@ -229,7 +239,7 @@ void InitializeExceptionHandling()
     PAL_SetGetGcMarkerExceptionCode(GetGcMarkerExceptionCode);
 
     // Register handler for termination requests (e.g. SIGTERM)
-    PAL_SetTerminationRequestHandler(ShutdownEEAndExitProcess);
+    PAL_SetTerminationRequestHandler(HandleTerminationRequest);
 #endif // FEATURE_PAL
 }
 
@@ -812,8 +822,8 @@ UINT_PTR ExceptionTracker::FinishSecondPass(
 // unlike its 64bit counterparts.
 EXTERN_C EXCEPTION_DISPOSITION
 ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
-          WIN64_ARG(IN     ULONG64             MemoryStackFp)
-      NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+          BIT64_ARG(IN     ULONG64             MemoryStackFp)
+      NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                     IN OUT PCONTEXT            pContextRecord,
                     IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                     )
@@ -868,7 +878,7 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
     // we don't handle the SO.
     if (!(dwExceptionFlags & EXCEPTION_UNWINDING))
     {
-        if (IsSOExceptionCode(pExceptionRecord->ExceptionCode))
+        if (pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
         {
             // We don't need to unwind the frame chain here because we have backstop
             // personality routines at the U2M boundary to handle do that.  They are
@@ -882,33 +892,22 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
             FastInterlockAnd (&pThread->m_fPreemptiveGCDisabled, 0);
             return ExceptionContinueSearch;
         }
-        else
-        {
-#ifdef FEATURE_STACK_PROBE
-            if (GetEEPolicy()->GetActionOnFailure(FAIL_StackOverflow) == eRudeUnloadAppDomain)
-            {
-                RetailStackProbe(static_cast<unsigned int>(ADJUST_PROBE(BACKOUT_CODE_STACK_LIMIT)), pThread);
-            }
-#endif
-        }
     }
     else
     {
         DWORD exceptionCode = pExceptionRecord->ExceptionCode;
 
-        if (exceptionCode == STATUS_UNWIND)
+        if ((NTSTATUS)exceptionCode == STATUS_UNWIND)
             // If exceptionCode is STATUS_UNWIND, RtlUnwind is called with a NULL ExceptionRecord,
             // therefore OS uses a faked ExceptionRecord with STATUS_UNWIND code.  Then we need to
             // look at our saved exception code.
             exceptionCode = GetCurrentExceptionCode();
 
-        if (IsSOExceptionCode(exceptionCode))
+        if (exceptionCode == STATUS_STACK_OVERFLOW)
         {
             return ExceptionContinueSearch;
         }
     }
-
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
 
     StackFrame sf((UINT_PTR)MemoryStackFp);
 
@@ -972,14 +971,10 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
             // It is a breakpoint; is it from the runtime or managed code?
             PCODE ip = GetIP(pContextRecord); // IP of the fault.
 
-            BOOL fExternalException = FALSE;
-
-            BEGIN_SO_INTOLERANT_CODE_NOPROBE;
+            BOOL fExternalException;
 
             fExternalException = (!ExecutionManager::IsManagedCode(ip) &&
                                   !IsIPInModule(g_pMSCorEE, ip));
-
-            END_SO_INTOLERANT_CODE_NOPROBE;
 
             if (fExternalException)
             {
@@ -1026,7 +1021,27 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
 
             // Failfast if exception indicates corrupted process state            
             if (pTracker->GetCorruptionSeverity() == ProcessCorrupting)
-                EEPOLICY_HANDLE_FATAL_ERROR(pExceptionRecord->ExceptionCode);
+            {
+                OBJECTREF oThrowable = NULL;
+                SString message;
+
+                GCPROTECT_BEGIN(oThrowable);
+                oThrowable = pTracker->GetThrowable();
+                if (oThrowable != NULL)
+                {
+                    EX_TRY
+                    {
+                        GetExceptionMessage(oThrowable, message);
+                    }
+                    EX_CATCH
+                    {
+                    }
+                    EX_END_CATCH(SwallowAllExceptions);
+                }
+                GCPROTECT_END();
+
+                EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(pExceptionRecord->ExceptionCode, (LPCWSTR)message);
+            }
         }
 #endif // FEATURE_CORRUPTING_EXCEPTIONS
 
@@ -1232,7 +1247,7 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
             // SO-tolerant mode before we do so.
             RestoreSOToleranceState();
 #endif
-            RESET_CONTRACT_VIOLATION();
+
             ExceptionTracker::ResumeExecution(pContextRecord,
                                               NULL
                                               );
@@ -1249,8 +1264,6 @@ lExit: ;
     {
         GCX_PREEMP_NO_DTOR();
     }
-
-    END_CONTRACT_VIOLATION;
 
     SetLastError(dwLastError);
 
@@ -1273,7 +1286,6 @@ bool FixNonvolatileRegisters(UINT_PTR  uOriginalSP,
         MODE_COOPERATIVE;
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -1823,6 +1835,12 @@ CLRUnwindStatus ExceptionTracker::ProcessOSExceptionNotification(
             //
             //    Thus, ICF::ExceptionUnwind should not do anything significant. If any of these assumptions
             //    break, then the next best thing will be to make the JIT link/unlink the frame dynamically.
+            //
+            // If the current method executing is from precompiled ReadyToRun code, then the above is no longer
+            // applicable because each PInvoke is wrapped by calls to the JIT_PInvokeBegin and JIT_PInvokeEnd
+            // helpers, which push and pop the ICF to the current thread. Unlike jitted code, the ICF is not
+            // linked during the method prolog, and unlinked at the epilog (it looks more like the X64 case).
+            // In that case, we need to unlink the ICF during unwinding here.
 
             if (fTargetUnwind && (pFrame->GetVTablePtr() == InlinedCallFrame::GetMethodFrameVPtr()))
             {
@@ -1835,9 +1853,21 @@ CLRUnwindStatus ExceptionTracker::ProcessOSExceptionNotification(
                     ((UINT_PTR)pICF < uCallerSP)) 
                 {
                     pICFForUnwindTarget = pFrame;
+
+                    // When unwinding an exception in ReadyToRun, the JIT_PInvokeEnd helper which unlinks the ICF from 
+                    // the thread will be skipped. This is because unlike jitted code, each pinvoke is wrapped by calls
+                    // to the JIT_PInvokeBegin and JIT_PInvokeEnd helpers, which push and pop the ICF on the thread. The
+                    // ICF is not linked at the method prolog and unlined at the epilog when running R2R code. Since the
+                    // JIT_PInvokeEnd helper will be skipped, we need to unlink the ICF here. If the executing method
+                    // has another pinovoke, it will re-link the ICF again when the JIT_PInvokeBegin helper is called
+
+                    if (ExecutionManager::IsReadyToRunCode(((InlinedCallFrame*)pFrame)->m_pCallerReturnAddress))
+                    {
+                        pICFForUnwindTarget = pICFForUnwindTarget->Next();
+                    }
                 }
             }
-#endif // defined(_TARGET_ARM_)
+#endif // USE_PER_FRAME_PINVOKE_INIT
 
             cfThisFrame.CheckGSCookies();
 
@@ -2669,17 +2699,6 @@ CLRUnwindStatus ExceptionTracker::ProcessManagedCallFrame(
 
         }
 
-#ifdef FEATURE_STACK_PROBE
-        // Don't call a handler if we're within a certain distance of the end of the stack.  Could end up here via probe, in
-        // which case guard page is intact, or via hard SO, in which case guard page won't be.  So don't check for presence of
-        // guard page, just check for sufficient space on stack.
-        if (   IsStackOverflowException()
-            && !pThread->CanResetStackTo((void*)sf.SP))
-        {
-            EH_LOG((LL_INFO100, "  STACKOVERFLOW: IGNOREFRAME: stack frame too close to guard page: sf.SP: %p\n", sf.SP));
-        }
-        else
-#endif // FEATURE_STACK_PROBE
         {
             IJitManager* pJitMan   = pcfThisFrame->GetJitManager();
             const METHODTOKEN& MethToken = pcfThisFrame->GetMethodToken();
@@ -3056,7 +3075,19 @@ CLRUnwindStatus ExceptionTracker::ProcessManagedCallFrame(
                             }
                             else
                             {
-                                TypeHandle typeHnd = pJitMan->ResolveEHClause(&EHClause, pcfThisFrame);
+                                TypeHandle typeHnd;
+                                EX_TRY
+                                {
+                                    typeHnd = pJitMan->ResolveEHClause(&EHClause, pcfThisFrame);
+                                }
+                                EX_CATCH_EX(Exception)
+                                {
+                                    SString msg;
+                                    GET_EXCEPTION()->GetMessage(msg);
+                                    msg.Insert(msg.Begin(), W("Cannot resolve EH clause:\n"));
+                                    EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_FAILFAST, msg.GetUnicode());
+                                }
+                                EX_END_CATCH(RethrowTransientExceptions);
 
                                 EH_LOG((LL_INFO100,
                                         "  clause type = %s\n",
@@ -3261,24 +3292,6 @@ lExit:
     return ReturnStatus;
 }
 
-// <64bit_And_Arm_Specific>
-
-// For funclets, add support for unwinding frame chain during SO. These definitions will be automatically picked up by
-// BEGIN_SO_TOLERANT_CODE/END_SO_TOLERANT_CODE usage in ExceptionTracker::CallHandler below.
-//
-// This is required since funclet invocation is the only case of calling managed code from VM that is not wrapped by
-// assembly helper with associated personality routine. The personality routine will invoke CleanupForSecondPass to 
-// release exception trackers and unwind frame chain.
-//
-// We need to do the same work as CleanupForSecondPass for funclet invocation in the face of SO. Thus, we redefine OPTIONAL_SO_CLEANUP_UNWIND
-// below. This will perform frame chain unwind inside the "__finally" block that is part of the END_SO_TOLERANT_CODE macro only in the face
-// of an SO. 
-//
-// The second part of work, releasing exception trackers, is done inside the "__except" block also part of the END_SO_TOLERANT_CODE by invoking
-// ClearExceptionStateAfterSO.
-//
-// </64bit_And_Arm_Specific>
-
 #undef OPTIONAL_SO_CLEANUP_UNWIND
 
 #define OPTIONAL_SO_CLEANUP_UNWIND(pThread, pFrame)  if (pThread->GetFrame() < pFrame) { UnwindFrameChain(pThread, pFrame); }
@@ -3360,15 +3373,6 @@ DWORD_PTR ExceptionTracker::CallHandler(
 
     throwable = PossiblyUnwrapThrowable(pThread->GetThrowable(), pMD->GetAssembly());
 
-    // We probe for stack space before attempting to call a filter, finally, or catch clause. The path from
-    // here to the actual managed code is very short. We must probe, however, because the JIT does not generate a
-    // probe for us upon entry to the handler. This probe ensures we have enough stack space to actually make it
-    // into the managed code.
-    //
-    // Incase a SO happens, this macro will also unwind the frame chain before continuing to dispatch the SO
-    // upstack (look at the macro implementation for details).
-    BEGIN_SO_TOLERANT_CODE(pThread);
-
     // Stores the current SP and BSP, which will be the caller SP and BSP for the funclet.
     // Note that we are making the assumption here that the SP and BSP don't change from this point
     // forward until we actually make the call to the funclet.  If it's not the case then we will need
@@ -3435,8 +3439,6 @@ DWORD_PTR ExceptionTracker::CallHandler(
     }
 
     this->m_EHClauseInfo.SetManagedCodeEntered(FALSE);
-
-    END_SO_TOLERANT_CODE;
 
     // The first parameter specifies whether we want to make callbacks before (true) or after (false)
     // calling the handler.
@@ -3872,7 +3874,7 @@ ExceptionTracker* ExceptionTracker::GetOrCreateTracker(
         //
         // Thus, if we see that we are here for SO in the 2nd pass, then
         // we shouldn't attempt to create a throwable.
-        if ((!fIsFirstPass) && (IsSOExceptionCode(pExceptionRecord->ExceptionCode)))
+        if ((!fIsFirstPass) && (pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW))
         {
             fCreateThrowableForCurrentPass = false;
         }
@@ -4016,6 +4018,13 @@ void ExceptionTracker::ResetLimitFrame()
     WRAPPER_NO_CONTRACT;
 
     m_pLimitFrame = m_pThread->GetFrame();
+}
+
+void ExceptionTracker::ResetInitialExplicitFrame()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    m_pInitialExplicitFrame = m_pThread->GetFrame();
 }
 
 //
@@ -4179,8 +4188,6 @@ void ExceptionTracker::MakeCallbacksRelatedToHandler(
             EEToDebuggerExceptionInterfaceWrapper::ExceptionFilter(pMD, (TADDR) dwHandlerStartPC, pEHClause->FilterOffset, (BYTE*)sf.SP);
 
             EEToProfilerExceptionInterfaceWrapper::ExceptionSearchFilterEnter(pMD);
-
-            COUNTER_ONLY(GetPerfCounters().m_Excep.cFiltersExecuted++);
         }
         else
         {
@@ -4190,7 +4197,6 @@ void ExceptionTracker::MakeCallbacksRelatedToHandler(
             {
                 m_EHClauseInfo.SetEHClauseType(COR_PRF_CLAUSE_FINALLY);
                 EEToProfilerExceptionInterfaceWrapper::ExceptionUnwindFinallyEnter(pMD);
-                COUNTER_ONLY(GetPerfCounters().m_Excep.cFinallysExecuted++);
             }
             else
             {
@@ -4658,6 +4664,24 @@ VOID DECLSPEC_NORETURN UnwindManagedExceptionPass1(PAL_SEHException& ex, CONTEXT
         // Check whether we are crossing managed-to-native boundary
         while (!ExecutionManager::IsManagedCode(controlPc))
         {
+#ifdef VSD_STUB_CAN_THROW_AV
+            if (IsIPinVirtualStub(controlPc))
+            {
+                AdjustContextForVirtualStub(NULL, frameContext);
+                controlPc = GetIP(frameContext);
+                break;
+            }
+#endif // VSD_STUB_CAN_THROW_AV
+
+#ifdef FEATURE_WRITEBARRIER_COPY            
+            if (IsIPInWriteBarrierCodeCopy(controlPc))
+            {
+                // Pretend we were executing the barrier function at its original location so that the unwinder can unwind the frame
+                controlPc = AdjustWriteBarrierIP(controlPc);
+                SetIP(frameContext, controlPc);
+            }
+#endif // FEATURE_WRITEBARRIER_COPY
+
             UINT_PTR sp = GetSP(frameContext);
 
             BOOL success = PAL_VirtualUnwind(frameContext, NULL);
@@ -4708,6 +4732,7 @@ VOID DECLSPEC_NORETURN UnwindManagedExceptionPass1(PAL_SEHException& ex, CONTEXT
 
     _ASSERTE(!"UnwindManagedExceptionPass1: Failed to find a handler. Reached the end of the stack");
     EEPOLICY_HANDLE_FATAL_ERROR(COR_E_EXECUTIONENGINE);
+    UNREACHABLE();
 }
 
 VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex, bool isHardwareException)
@@ -5140,42 +5165,18 @@ BOOL IsSafeToCallExecutionManager()
            GCStress<cfg_instr_ngen>::IsEnabled();
 }
 
-#ifdef VSD_STUB_CAN_THROW_AV
-//Return TRUE if pContext->Pc is in VirtualStub
-static BOOL IsIPinVirtualStub(PCODE f_IP)
-{
-    LIMITED_METHOD_CONTRACT;
-
-    Thread * pThread = GetThread();
-
-    // We may not have a managed thread object. Example is an AV on the helper thread.
-    // (perhaps during StubManager::IsStub)
-    if (pThread == NULL)
-    {
-        return FALSE;
-    }
-
-    VirtualCallStubManager::StubKind sk;
-    VirtualCallStubManager::FindStubManager(f_IP, &sk, FALSE /* usePredictStubKind */);
-
-    if (sk == VirtualCallStubManager::SK_DISPATCH)
-    {
-        return TRUE;
-    }
-    else if (sk == VirtualCallStubManager::SK_RESOLVE)
-    {
-        return TRUE;
-    }
-
-    else {
-        return FALSE;
-    }
-}
-#endif // VSD_STUB_CAN_THROW_AV
-
 BOOL IsSafeToHandleHardwareException(PCONTEXT contextRecord, PEXCEPTION_RECORD exceptionRecord)
 {
     PCODE controlPc = GetIP(contextRecord);
+
+#ifdef FEATURE_WRITEBARRIER_COPY
+    if (IsIPInWriteBarrierCodeCopy(controlPc))
+    {
+        // Pretend we were executing the barrier function at its original location
+        controlPc = AdjustWriteBarrierIP(controlPc);
+    }
+#endif // FEATURE_WRITEBARRIER_COPY
+
     return g_fEEStarted && (
         exceptionRecord->ExceptionCode == STATUS_BREAKPOINT || 
         exceptionRecord->ExceptionCode == STATUS_SINGLE_STEP ||
@@ -5186,18 +5187,9 @@ BOOL IsSafeToHandleHardwareException(PCONTEXT contextRecord, PEXCEPTION_RECORD e
         IsIPInMarkedJitHelper(controlPc));
 }
 
-#ifdef _TARGET_ARM_
-static inline BOOL HandleArmSingleStep(PCONTEXT pContext, PEXCEPTION_RECORD pExceptionRecord, Thread *pThread)
+#ifdef FEATURE_EMULATE_SINGLESTEP
+static inline BOOL HandleSingleStep(PCONTEXT pContext, PEXCEPTION_RECORD pExceptionRecord, Thread *pThread)
 {
-#ifdef __linux__
-    // On ARM Linux exception point to the break instruction,
-    // but the rest of the code expects that it points to an instruction after the break
-    if (pExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT)
-    {
-        SetIP(pContext, GetIP(pContext) + CORDbg_BREAK_INSTRUCTION_SIZE);
-        pExceptionRecord->ExceptionAddress = (void *)GetIP(pContext);
-    }
-#endif
     // On ARM we don't have any reliable hardware support for single stepping so it is emulated in software.
     // The implementation will end up throwing an EXCEPTION_BREAKPOINT rather than an EXCEPTION_SINGLE_STEP
     // and leaves other aspects of the thread context in an invalid state. Therefore we use this opportunity
@@ -5216,7 +5208,7 @@ static inline BOOL HandleArmSingleStep(PCONTEXT pContext, PEXCEPTION_RECORD pExc
     }
     return FALSE;
 }
-#endif // _TARGET_ARM_
+#endif // FEATURE_EMULATE_SINGLESTEP
 
 BOOL HandleHardwareException(PAL_SEHException* ex)
 {
@@ -5254,6 +5246,16 @@ BOOL HandleHardwareException(PAL_SEHException* ex)
         *((&fef)->GetGSCookiePtr()) = GetProcessGSCookie();
         {
             GCX_COOP();     // Must be cooperative to modify frame chain.
+
+#ifdef FEATURE_WRITEBARRIER_COPY
+            if (IsIPInWriteBarrierCodeCopy(controlPc))
+            {
+                // Pretend we were executing the barrier function at its original location so that the unwinder can unwind the frame
+                controlPc = AdjustWriteBarrierIP(controlPc);
+                SetIP(ex->GetContextRecord(), controlPc);
+            }
+#endif // FEATURE_WRITEBARRIER_COPY
+
             if (IsIPInMarkedJitHelper(controlPc))
             {
                 // For JIT helpers, we need to set the frame to point to the
@@ -5281,8 +5283,20 @@ BOOL HandleHardwareException(PAL_SEHException* ex)
         Thread *pThread = GetThread();
         if (pThread != NULL && g_pDebugInterface != NULL)
         {
-#ifdef _TARGET_ARM_
-            HandleArmSingleStep(ex->GetContextRecord(), ex->GetExceptionRecord(), pThread);
+            // On ARM and ARM64 Linux exception point to the break instruction.
+            // See https://static.docs.arm.com/ddi0487/db/DDI0487D_b_armv8_arm.pdf#page=6916&zoom=100,0,152
+            // at aarch64/exceptions/debug/AArch64.SoftwareBreakpoint
+            // However, the rest of the code expects that it points to an instruction after the break.
+#if defined(__linux__) && (defined(_TARGET_ARM_) || defined(_TARGET_ARM64_))
+            if (ex->GetExceptionRecord()->ExceptionCode == STATUS_BREAKPOINT)
+            {
+                SetIP(ex->GetContextRecord(), GetIP(ex->GetContextRecord()) + CORDbg_BREAK_INSTRUCTION_SIZE);
+                ex->GetExceptionRecord()->ExceptionAddress = (void *)GetIP(ex->GetContextRecord());
+            }
+#endif
+
+#ifdef FEATURE_EMULATE_SINGLESTEP
+            HandleSingleStep(ex->GetContextRecord(), ex->GetExceptionRecord(), pThread);
 #endif
             if (ex->GetExceptionRecord()->ExceptionCode == STATUS_BREAKPOINT)
             {
@@ -5622,7 +5636,6 @@ BOOL FirstCallToHandler (
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5646,8 +5659,8 @@ BOOL FirstCallToHandler (
 
 EXTERN_C EXCEPTION_DISPOSITION
 HijackHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
-    WIN64_ARG(IN     ULONG64             MemoryStackFp)
-NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+    BIT64_ARG(IN     ULONG64             MemoryStackFp)
+NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
               IN OUT PCONTEXT            pContextRecord,
               IN OUT PDISPATCHER_CONTEXT pDispatcherContext
              )
@@ -5657,7 +5670,6 @@ NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
         GC_NOTRIGGER;
         NOTHROW;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5669,8 +5681,6 @@ NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
 
     Thread* pThread = GetThread();
     CONTEXT *pNewContext = NULL;
-
-    VALIDATE_BACKOUT_STACK_CONSUMPTION;
 
     if (FirstCallToHandler(pDispatcherContext, &pNewContext))
     {
@@ -5713,18 +5723,13 @@ EXTERN_C VOID FixContextForFaultingExceptionFrame (
 
 EXTERN_C EXCEPTION_DISPOSITION
 FixContextHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
-        WIN64_ARG(IN     ULONG64             MemoryStackFp)
-    NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+        BIT64_ARG(IN     ULONG64             MemoryStackFp)
+    NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                   IN OUT PCONTEXT            pContextRecord,
                   IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                  )
 {
     CONTEXT* pNewContext = NULL;
-
-    VALIDATE_BACKOUT_STACK_CONSUMPTION;
-
-    // Our backout validation should ensure that we don't SO here.
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
 
     if (FirstCallToHandler(pDispatcherContext, &pNewContext))
     {
@@ -5738,8 +5743,6 @@ FixContextHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
     }
 
     FixupDispatcherContext(pDispatcherContext, pNewContext, pContextRecord);
-
-    END_CONTRACT_VIOLATION;
 
     // Returning ExceptionCollidedUnwind will cause the OS to take our new context record
     // and dispatcher context and restart the exception dispatching on this call frame,
@@ -5868,8 +5871,8 @@ UnhandledExceptionHandlerUnix(
 
 EXTERN_C EXCEPTION_DISPOSITION
 UMThunkUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
-                     WIN64_ARG(IN     ULONG64             MemoryStackFp)
-                 NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+                     BIT64_ARG(IN     ULONG64             MemoryStackFp)
+                 NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                                IN OUT PCONTEXT            pContextRecord,
                                IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                               )
@@ -5879,10 +5882,7 @@ UMThunkUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
         return ExceptionContinueSearch;
     }
 
-    bool fIsSO =
-        IsSOExceptionCode(pExceptionRecord->ExceptionCode);
-
-    VALIDATE_BACKOUT_STACK_CONSUMPTION;
+    bool fIsSO = pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW;
 
     if (IS_UNWINDING(pExceptionRecord->ExceptionFlags))
     {
@@ -5893,8 +5893,6 @@ UMThunkUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
                 pThread->DisablePreemptiveGC();
             }
         }
-        // The VALIDATE_BACKOUT_STACK_CONSUMPTION makes sure that this function does not use stack more than backout limit.
-        CONTRACT_VIOLATION(SOToleranceViolation);
         CleanUpForSecondPass(pThread, fIsSO, (void*)MemoryStackFp, (void*)MemoryStackFp);
     }
 
@@ -5919,8 +5917,8 @@ UMThunkUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
 EXTERN_C EXCEPTION_DISPOSITION
 UMEntryPrestubUnwindFrameChainHandler(
                 IN     PEXCEPTION_RECORD   pExceptionRecord
-      WIN64_ARG(IN     ULONG64             MemoryStackFp)
-  NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+      BIT64_ARG(IN     ULONG64             MemoryStackFp)
+  NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                 IN OUT PCONTEXT            pContextRecord,
                 IN OUT PDISPATCHER_CONTEXT pDispatcherContext
             )
@@ -5938,8 +5936,8 @@ UMEntryPrestubUnwindFrameChainHandler(
 EXTERN_C EXCEPTION_DISPOSITION
 UMThunkStubUnwindFrameChainHandler(
               IN     PEXCEPTION_RECORD   pExceptionRecord
-    WIN64_ARG(IN     ULONG64             MemoryStackFp)
-NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+    BIT64_ARG(IN     ULONG64             MemoryStackFp)
+NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
               IN OUT PCONTEXT            pContextRecord,
               IN OUT PDISPATCHER_CONTEXT pDispatcherContext
             )
@@ -5974,8 +5972,8 @@ NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
 // managed code.
 EXTERN_C EXCEPTION_DISPOSITION
 CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
-                             WIN64_ARG(IN     ULONG64             MemoryStackFp)
-                         NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+                             BIT64_ARG(IN     ULONG64             MemoryStackFp)
+                         NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                                        IN OUT PCONTEXT            pContextRecord,
                                        IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                                       )
@@ -5984,7 +5982,7 @@ CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionReco
     Thread* pThread = GetThread();
     _ASSERTE(pThread);
 
-    if (IsSOExceptionCode(pExceptionRecord->ExceptionCode))
+    if (pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
     {
         if (IS_UNWINDING(pExceptionRecord->ExceptionFlags))
         {
@@ -6003,10 +6001,6 @@ CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionReco
                                                        pContextRecord,
                                                        pDispatcherContext);
 
-    // Our backout validation should ensure that we don't SO here.  Add a
-    // backout validation here.
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
-
     if (retVal == ExceptionContinueSearch)
     {
 
@@ -6020,8 +6014,6 @@ CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionReco
         GCX_PREEMP_NO_DTOR();
     }
 
-    END_CONTRACT_VIOLATION;
-
     return retVal;
 }
 
@@ -6030,8 +6022,8 @@ CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionReco
 #ifdef FEATURE_COMINTEROP
 EXTERN_C EXCEPTION_DISPOSITION
 ReverseComUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
-                        WIN64_ARG(IN     ULONG64             MemoryStackFp)
-                    NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+                        BIT64_ARG(IN     ULONG64             MemoryStackFp)
+                    NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                                   IN OUT PCONTEXT            pContextRecord,
                                   IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                                  )
@@ -6048,8 +6040,8 @@ ReverseComUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
 EXTERN_C EXCEPTION_DISPOSITION
 FixRedirectContextHandler(
                   IN     PEXCEPTION_RECORD   pExceptionRecord
-        WIN64_ARG(IN     ULONG64             MemoryStackFp)
-    NOT_WIN64_ARG(IN     ULONG               MemoryStackFp),
+        BIT64_ARG(IN     ULONG64             MemoryStackFp)
+    NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
                   IN OUT PCONTEXT            pContextRecord,
                   IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                  )
@@ -6059,7 +6051,6 @@ FixRedirectContextHandler(
         GC_NOTRIGGER;
         NOTHROW;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -6068,8 +6059,6 @@ FixRedirectContextHandler(
         pDispatcherContext->EstablisherFrame,
         pContextRecord,
         pDispatcherContext->ContextRecord);
-
-    VALIDATE_BACKOUT_STACK_CONSUMPTION;
 
     CONTEXT *pRedirectedContext = GetCONTEXTFromRedirectedStubStackFrame(pDispatcherContext);
 
@@ -6119,15 +6108,15 @@ void ExceptionTracker::StackRange::CombineWith(StackFrame sfCurrent, StackRange*
         // the frame where the nesting first occurs and that will ensure that the stack range of the new
         // nested exception is extended to contain the scan range of the previous tracker's scan.  However,
         // if the exception dispatch calls a C++ handler (e.g. a finally) and then that handler tries to 
-        // reverse-pinvoke into the runtime, AND we trigger an exception (e.g. ThreadAboard, 
-        // AppDomainUnloaded) before we reach another managed frame (which would have the CLR personality
+        // reverse-pinvoke into the runtime, AND we trigger an exception (e.g. ThreadAbort) 
+        // before we reach another managed frame (which would have the CLR personality
         // routine associated with it), the first callback to ProcessCLRException for this new exception
         // will occur on a frame that has never been seen before by the current tracker.
         //
         // So in this case, we'll see a sfCurrent that is larger than the previous tracker's high bound and
         // we'll have an empty scan range for the current tracker.  And we'll just need to pre-init the 
         // scanned stack range for the new tracker to the previous tracker's range.  This maintains the 
-        // invariant that the scanned range for nested trackers completely cover the scanned range of thier
+        // invariant that the scanned range for nested trackers completely cover the scanned range of their
         // previous tracker once they "escape" the previous tracker.
         STRESS_LOG3(LF_EH, LL_INFO100, 
             "Initializing current StackRange with previous tracker's StackRange.  sfCurrent: %p, prev low: %p, prev high: %p\n",
@@ -6452,7 +6441,7 @@ bool ExceptionTracker::HasFrameBeenUnwoundByAnyActiveException(CrawlFrame * pCF)
                 // then:
                 //
                 // For case (1) above, sfCurrentEstablisherFrame will be the same as the callerSP of the managed frame.
-                // For case (2) above, sfLastUnwoundEstbalisherFrame would be the same as the managed frame's SP (or upper bound)
+                // For case (2) above, sfLastUnwoundEstablisherFrame would be the same as the managed frame's SP (or upper bound)
                 //
                 // For these scenarios, the frame is considered unwound.
 
@@ -6475,8 +6464,8 @@ bool ExceptionTracker::HasFrameBeenUnwoundByAnyActiveException(CrawlFrame * pCF)
 #else // !STACK_RANGE_BOUNDS_ARE_CALLER_SP
                 // On ARM, if the callerSP of the managed frame is the same as upper bound, then:
                 // 
-                // For case (1), sfCurrentEstablisherFrame will be above the callerSP of the managed frame (since EstbalisherFrame is the caller SP for a given frame on ARM)
-                // For case (2), upper bound will be the same as LastUnwoundEstbalisherFrame.
+                // For case (1), sfCurrentEstablisherFrame will be above the callerSP of the managed frame (since EstablisherFrame is the caller SP for a given frame on ARM)
+                // For case (2), upper bound will be the same as LastUnwoundEstablisherFrame.
                 //
                 // For these scenarios, the frame is considered unwound.
                 if (sfUpperBound == csfToCheck)
@@ -7189,5 +7178,5 @@ void ExceptionTracker::ResetThreadAbortStatus(PTR_Thread pThread, CrawlFrame *pC
 }
 #endif //!DACCESS_COMPILE
 
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 

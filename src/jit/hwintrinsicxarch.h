@@ -15,10 +15,6 @@ enum HWIntrinsicCategory : unsigned int
     // - the codegen of overloads can be determined by intrinsicID and base type of returned vector
     HW_Category_SimpleSIMD,
 
-    // IsSupported Property
-    // - each ISA class has an "IsSupported" property
-    HW_Category_IsSupportedProperty,
-
     // IMM intrinsics
     // - some SIMD intrinsics requires immediate value (i.e. imm8) to generate instruction
     HW_Category_IMM,
@@ -57,72 +53,62 @@ enum HWIntrinsicFlag : unsigned int
     // - the immediate value is valid on the full range of imm8 (0-255)
     HW_Flag_FullRangeIMM = 0x2,
 
-    // Generic
-    // - must throw NotSupportException if the type argument is not numeric type
-    HW_Flag_OneTypeGeneric = 0x4,
-    // Two-type Generic
-    // - the intrinsic has two type parameters
-    HW_Flag_TwoTypeGeneric = 0x8,
-
     // NoCodeGen
     // - should be transformed in the compiler front-end, cannot reach CodeGen
-    HW_Flag_NoCodeGen = 0x10,
+    HW_Flag_NoCodeGen = 0x8,
 
     // Unfixed SIMD-size
     // - overloaded on multiple vector sizes (SIMD size in the table is unreliable)
-    HW_Flag_UnfixedSIMDSize = 0x20,
-
-    // Complex overload
-    // - the codegen of overloads cannot be determined by intrinsicID and base type
-    HW_Flag_ComplexOverloads = 0x40,
+    HW_Flag_UnfixedSIMDSize = 0x10,
 
     // Multi-instruction
     // - that one intrinsic can generate multiple instructions
-    HW_Flag_MultiIns = 0x80,
+    HW_Flag_MultiIns = 0x20,
 
     // NoContainment
-    // the intrinsic cannot be contained
-    HW_Flag_NoContainment = 0x100,
+    // the intrinsic cannot be handled by comtainment,
+    // all the intrinsic that have explicit memory load/store semantics should have this flag
+    HW_Flag_NoContainment = 0x40,
 
     // Copy Upper bits
     // some SIMD scalar intrinsics need the semantics of copying upper bits from the source operand
-    HW_Flag_CopyUpperBits = 0x200,
+    HW_Flag_CopyUpperBits = 0x80,
 
     // Select base type using the first argument type
-    HW_Flag_BaseTypeFromFirstArg = 0x400,
+    HW_Flag_BaseTypeFromFirstArg = 0x100,
 
     // Indicates compFloatingPointUsed does not need to be set.
-    HW_Flag_NoFloatingPointUsed = 0x800,
+    HW_Flag_NoFloatingPointUsed = 0x200,
 
     // Maybe IMM
     // the intrinsic has either imm or Vector overloads
-    HW_Flag_MaybeIMM = 0x1000,
+    HW_Flag_MaybeIMM = 0x400,
 
     // NoJmpTable IMM
     // the imm intrinsic does not need jumptable fallback when it gets non-const argument
-    HW_Flag_NoJmpTableIMM = 0x2000,
-
-    // 64-bit intrinsics
-    // Intrinsics that operate over 64-bit general purpose registers are not supported on 32-bit platform
-    HW_Flag_64BitOnly           = 0x4000,
-    HW_Flag_SecondArgMaybe64Bit = 0x8000,
+    HW_Flag_NoJmpTableIMM = 0x800,
 
     // Select base type using the second argument type
-    HW_Flag_BaseTypeFromSecondArg = 0x10000,
+    HW_Flag_BaseTypeFromSecondArg = 0x1000,
 
     // Special codegen
     // the intrinsics need special rules in CodeGen,
     // but may be table-driven in the front-end
-    HW_Flag_SpecialCodeGen = 0x20000,
+    HW_Flag_SpecialCodeGen = 0x2000,
 
     // No Read/Modify/Write Semantics
     // the intrinsic doesn't have read/modify/write semantics in two/three-operand form.
-    HW_Flag_NoRMWSemantics = 0x40000,
+    HW_Flag_NoRMWSemantics = 0x4000,
 
     // Special import
     // the intrinsics need special rules in importer,
     // but may be table-driven in the back-end
-    HW_Flag_SpecialImport = 0x80000,
+    HW_Flag_SpecialImport = 0x8000,
+
+    // Maybe Memory Load/Store
+    // - some intrinsics may have pointer overloads but without HW_Category_MemoryLoad/HW_Category_MemoryStore
+    HW_Flag_MaybeMemoryLoad  = 0x10000,
+    HW_Flag_MaybeMemoryStore = 0x20000,
 };
 
 struct HWIntrinsicInfo
@@ -139,8 +125,11 @@ struct HWIntrinsicInfo
 
     static const HWIntrinsicInfo& lookup(NamedIntrinsic id);
 
-    static NamedIntrinsic lookupId(const char* className, const char* methodName);
-    static InstructionSet lookupIsa(const char* className);
+    static NamedIntrinsic lookupId(Compiler*   comp,
+                                   const char* className,
+                                   const char* methodName,
+                                   const char* enclosingClassName);
+    static InstructionSet lookupIsa(const char* className, const char* enclosingClassName);
 
     static unsigned lookupSimdSize(Compiler* comp, NamedIntrinsic id, CORINFO_SIG_INFO* sig);
 
@@ -189,7 +178,11 @@ struct HWIntrinsicInfo
 
     static instruction lookupIns(NamedIntrinsic id, var_types type)
     {
-        assert((type >= TYP_BYTE) && (type <= TYP_DOUBLE));
+        if ((type < TYP_BYTE) || (type > TYP_DOUBLE))
+        {
+            assert(!"Unexpected type");
+            return INS_invalid;
+        }
         return lookup(id).ins[type - TYP_BYTE];
     }
 
@@ -205,121 +198,103 @@ struct HWIntrinsicInfo
 
     // Flags lookup
 
-    static const bool IsCommutative(NamedIntrinsic id)
+    static bool IsCommutative(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_Commutative) != 0;
     }
 
-    static const bool HasFullRangeImm(NamedIntrinsic id)
+    static bool HasFullRangeImm(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_FullRangeIMM) != 0;
     }
 
-    static const bool IsOneTypeGeneric(NamedIntrinsic id)
-    {
-        HWIntrinsicFlag flags = lookupFlags(id);
-        return (flags & HW_Flag_OneTypeGeneric) != 0;
-    }
-
-    static const bool IsTwoTypeGeneric(NamedIntrinsic id)
-    {
-        HWIntrinsicFlag flags = lookupFlags(id);
-        return (flags & HW_Flag_TwoTypeGeneric) != 0;
-    }
-
-    static const bool RequiresCodegen(NamedIntrinsic id)
+    static bool RequiresCodegen(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_NoCodeGen) == 0;
     }
 
-    static const bool HasFixedSimdSize(NamedIntrinsic id)
+    static bool HasFixedSimdSize(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_UnfixedSIMDSize) == 0;
     }
 
-    static const bool HasComplexOverloads(NamedIntrinsic id)
-    {
-        HWIntrinsicFlag flags = lookupFlags(id);
-        return (flags & HW_Flag_ComplexOverloads) != 0;
-    }
-
-    static const bool GeneratesMultipleIns(NamedIntrinsic id)
+    static bool GeneratesMultipleIns(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_MultiIns) != 0;
     }
 
-    static const bool SupportsContainment(NamedIntrinsic id)
+    static bool SupportsContainment(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_NoContainment) == 0;
     }
 
-    static const bool CopiesUpperBits(NamedIntrinsic id)
+    static bool CopiesUpperBits(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_CopyUpperBits) != 0;
     }
 
-    static const bool BaseTypeFromFirstArg(NamedIntrinsic id)
+    static bool BaseTypeFromFirstArg(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_BaseTypeFromFirstArg) != 0;
     }
 
-    static const bool IsFloatingPointUsed(NamedIntrinsic id)
+    static bool IsFloatingPointUsed(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_NoFloatingPointUsed) == 0;
     }
 
-    static const bool MaybeImm(NamedIntrinsic id)
+    static bool MaybeImm(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_MaybeIMM) != 0;
     }
 
-    static const bool NoJmpTableImm(NamedIntrinsic id)
+    static bool MaybeMemoryLoad(NamedIntrinsic id)
+    {
+        HWIntrinsicFlag flags = lookupFlags(id);
+        return (flags & HW_Flag_MaybeMemoryLoad) != 0;
+    }
+
+    static bool MaybeMemoryStore(NamedIntrinsic id)
+    {
+        HWIntrinsicFlag flags = lookupFlags(id);
+        return (flags & HW_Flag_MaybeMemoryStore) != 0;
+    }
+
+    static bool NoJmpTableImm(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_NoJmpTableIMM) != 0;
     }
 
-    static const bool Is64BitOnly(NamedIntrinsic id)
-    {
-        HWIntrinsicFlag flags = lookupFlags(id);
-        return (flags & HW_Flag_64BitOnly) != 0;
-    }
-
-    static const bool SecondArgMaybe64Bit(NamedIntrinsic id)
-    {
-        HWIntrinsicFlag flags = lookupFlags(id);
-        return (flags & HW_Flag_SecondArgMaybe64Bit) != 0;
-    }
-
-    static const bool BaseTypeFromSecondArg(NamedIntrinsic id)
+    static bool BaseTypeFromSecondArg(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_BaseTypeFromSecondArg) != 0;
     }
 
-    static const bool HasSpecialCodegen(NamedIntrinsic id)
+    static bool HasSpecialCodegen(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_SpecialCodeGen) != 0;
     }
 
-    static const bool HasRMWSemantics(NamedIntrinsic id)
+    static bool HasRMWSemantics(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_NoRMWSemantics) == 0;
     }
 
-    static const bool HasSpecialImport(NamedIntrinsic id)
+    static bool HasSpecialImport(NamedIntrinsic id)
     {
         HWIntrinsicFlag flags = lookupFlags(id);
         return (flags & HW_Flag_SpecialImport) != 0;

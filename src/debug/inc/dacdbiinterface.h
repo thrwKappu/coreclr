@@ -2696,6 +2696,59 @@ public:
     virtual
         HRESULT GetILCodeVersionNodeData(VMPTR_ILCodeVersionNode ilCodeVersionNode, DacSharedReJitInfo* pData) = 0;
 
+    // Enable or disable the GC notification events. The GC notification events are turned off by default
+    // They will be delivered through ICorDebugManagedCallback4
+    // 
+    // 
+    // Arguments:
+    //    fEnable - true to enable the events, false to disable
+    //
+    // Returns:
+    //    S_OK if no error
+    //    error HRESULTs such as CORDBG_READ_VIRTUAL_FAILURE are possible
+    // 
+    virtual
+        HRESULT EnableGCNotificationEvents(BOOL fEnable) = 0;
+
+
+    typedef enum
+    {
+        kClosedDelegate,
+        kOpenDelegate,
+        kOpenInstanceVSD,
+        kClosedStaticWithScpecialSig,
+        kTrueMulticastDelegate,
+        kSecureDelegate,
+        kUnmanagedFunctionDelegate,
+        kUnknownDelegateType
+    } DelegateType;
+
+    // Returns true if the object is a type deriving from System.MulticastDelegate
+    //
+    // Arguments:
+    //    vmObject - pointer to runtime object to query for.
+    //
+    virtual
+    BOOL IsDelegate(VMPTR_Object vmObject) = 0;
+
+    // Returns the delegate type
+    virtual
+    HRESULT GetDelegateType(VMPTR_Object delegateObject, DelegateType *delegateType) = 0;
+
+    virtual
+    HRESULT GetDelegateFunctionData(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_DomainFile *ppFunctionDomainFile,
+        OUT mdMethodDef *pMethodDef) = 0;
+
+    virtual
+    HRESULT GetDelegateTargetObject(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_Object *ppTargetObj,
+        OUT VMPTR_AppDomain *ppTargetAppDomain) = 0;
+
     // The following tag tells the DD-marshalling tool to stop scanning.
     // END_MARSHAL
     

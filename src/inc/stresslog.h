@@ -17,7 +17,12 @@
 /* The log has a very simple structure, and it meant to be dumped from a NTSD 
    extention (eg. strike). There is no memory allocation system calls etc to purtub things */
 
-/* see the tools/strike/stressdump.cpp for the dumper utility that parses this log */
+// ******************************************************************************
+// WARNING!!!: These classes are used by SOS in the diagnostics repo. Values should 
+// added or removed in a backwards and forwards compatible way.
+// See: https://github.com/dotnet/diagnostics/blob/master/src/inc/stresslog.h
+// Parser: https://github.com/dotnet/diagnostics/blob/master/src/SOS/Strike/stressLogDump.cpp
+// ******************************************************************************
 
 /*************************************************************************************/
 
@@ -127,7 +132,7 @@
             LOG((facility, level, msg, data1, data2, data3, data4, data5, data6, data7));               \
             } while(0)
 
-#define STRESS_LOG_COND0(facility, level, msg) do {                           \
+#define STRESS_LOG_COND0(facility, level, cond, msg) do {                     \
             if (StressLog::LogOn(facility, level) && (cond))                  \
                 StressLog::LogMsg(level, facility, 0, msg);                   \
             LOG((facility, level, msg));                                      \
@@ -397,7 +402,7 @@ typedef USHORT
     static StressLog theLog;    // We only have one log, and this is it
 };
 
-typedef Holder<CRITSEC_COOKIE, StressLog::Enter, StressLog::Leave, NULL, CompareDefault<CRITSEC_COOKIE>, HSV_NoValidation> StressLogLockHolder;
+typedef Holder<CRITSEC_COOKIE, StressLog::Enter, StressLog::Leave, NULL, CompareDefault<CRITSEC_COOKIE>> StressLogLockHolder;
 
 #if defined(DACCESS_COMPILE)
 inline BOOL StressLog::LogOn(unsigned facility, unsigned level)
@@ -440,11 +445,11 @@ struct StressMsg {
     friend class ThreadStressLog;
     friend class StressLog;
 };
-#ifdef _WIN64
+#ifdef BIT64
 #define STRESSLOG_CHUNK_SIZE (32 * 1024)
-#else //_WIN64
+#else //BIT64
 #define STRESSLOG_CHUNK_SIZE (16 * 1024)
-#endif //_WIN64
+#endif //BIT64
 #define GC_STRESSLOG_MULTIPLY 5
 
 // a chunk of memory for stress log

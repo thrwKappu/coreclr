@@ -78,7 +78,6 @@ inline BOOL WinRTSupported()
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_CANNOT_TAKE_LOCK;
-    STATIC_CONTRACT_SO_TOLERANT;
     
 #ifdef CROSSGEN_COMPILE
     return TRUE;
@@ -95,7 +94,7 @@ inline BOOL WinRTSupported()
 
 #endif // FEATURE_COMINTEROP
 
-#ifdef _WIN64
+#ifdef BIT64
 inline BOOL RunningInWow64()
 {
     return FALSE;

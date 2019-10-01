@@ -39,6 +39,7 @@ enum SignatureKind
 
 class Stub;
 class MethodDesc;
+class NativeCodeVersion;
 class FieldDesc;
 enum RuntimeExceptionKind;
 class AwareLock;
@@ -68,7 +69,7 @@ bool SigInfoFlagsAreValid (CORINFO_SIG_INFO *sig)
 void InitJITHelpers1();
 void InitJITHelpers2();
 
-PCODE UnsafeJitFunction(MethodDesc* ftn, COR_ILMETHOD_DECODER* header,
+PCODE UnsafeJitFunction(NativeCodeVersion nativeCodeVersion, COR_ILMETHOD_DECODER* header,
                         CORJIT_FLAGS flags, ULONG* sizeOfCode = NULL);
 
 void getMethodInfoHelper(MethodDesc * ftn,
@@ -82,11 +83,9 @@ void getMethodInfoILMethodHeaderHelper(
     );
 
 
-#ifdef FEATURE_PREJIT
 BOOL LoadDynamicInfoEntry(Module *currentModule,
                           RVA fixupRva,
                           SIZE_T *entry);
-#endif // FEATURE_PREJIT
 
 //
 // The legacy x86 monitor helpers do not need a state argument
@@ -166,26 +165,26 @@ EXTERN_C FCDECL_MONHELPER(JIT_MonExitStatic_Portable, AwareLock *lock);
 #ifndef JIT_GetSharedGCStaticBase
 #define JIT_GetSharedGCStaticBase JIT_GetSharedGCStaticBase_Portable
 #endif
-EXTERN_C FCDECL2(void*, JIT_GetSharedGCStaticBase, SIZE_T moduleDomainID, DWORD dwModuleClassID);
-EXTERN_C FCDECL2(void*, JIT_GetSharedGCStaticBase_Portable, SIZE_T moduleDomainID, DWORD dwModuleClassID);
+EXTERN_C FCDECL2(void*, JIT_GetSharedGCStaticBase, DomainLocalModule *pLocalModule, DWORD dwModuleClassID);
+EXTERN_C FCDECL2(void*, JIT_GetSharedGCStaticBase_Portable, DomainLocalModule *pLocalModule, DWORD dwModuleClassID);
 
 #ifndef JIT_GetSharedNonGCStaticBase
 #define JIT_GetSharedNonGCStaticBase JIT_GetSharedNonGCStaticBase_Portable
 #endif
-EXTERN_C FCDECL2(void*, JIT_GetSharedNonGCStaticBase, SIZE_T moduleDomainID, DWORD dwModuleClassID);
-EXTERN_C FCDECL2(void*, JIT_GetSharedNonGCStaticBase_Portable, SIZE_T moduleDomainID, DWORD dwModuleClassID);
+EXTERN_C FCDECL2(void*, JIT_GetSharedNonGCStaticBase, DomainLocalModule *pLocalModule, DWORD dwModuleClassID);
+EXTERN_C FCDECL2(void*, JIT_GetSharedNonGCStaticBase_Portable, DomainLocalModule *pLocalModule, DWORD dwModuleClassID);
 
 #ifndef JIT_GetSharedGCStaticBaseNoCtor
 #define JIT_GetSharedGCStaticBaseNoCtor JIT_GetSharedGCStaticBaseNoCtor_Portable
 #endif
-EXTERN_C FCDECL1(void*, JIT_GetSharedGCStaticBaseNoCtor, SIZE_T moduleDomainID);
-EXTERN_C FCDECL1(void*, JIT_GetSharedGCStaticBaseNoCtor_Portable, SIZE_T moduleDomainID);
+EXTERN_C FCDECL1(void*, JIT_GetSharedGCStaticBaseNoCtor, DomainLocalModule *pLocalModule);
+EXTERN_C FCDECL1(void*, JIT_GetSharedGCStaticBaseNoCtor_Portable, DomainLocalModule *pLocalModule);
 
 #ifndef JIT_GetSharedNonGCStaticBaseNoCtor
 #define JIT_GetSharedNonGCStaticBaseNoCtor JIT_GetSharedNonGCStaticBaseNoCtor_Portable
 #endif
-EXTERN_C FCDECL1(void*, JIT_GetSharedNonGCStaticBaseNoCtor, SIZE_T moduleDomainID);
-EXTERN_C FCDECL1(void*, JIT_GetSharedNonGCStaticBaseNoCtor_Portable, SIZE_T moduleDomainID);
+EXTERN_C FCDECL1(void*, JIT_GetSharedNonGCStaticBaseNoCtor, DomainLocalModule *pLocalModule);
+EXTERN_C FCDECL1(void*, JIT_GetSharedNonGCStaticBaseNoCtor_Portable, DomainLocalModule *pLocalModule);
 
 #ifndef JIT_ChkCastClass
 #define JIT_ChkCastClass JIT_ChkCastClass_Portable
@@ -229,6 +228,11 @@ EXTERN_C FCDECL1(Object*, JIT_NewCrossContext_Portable, CORINFO_CLASS_HANDLE typ
 extern FCDECL1(StringObject*, AllocateString_MP_FastPortable, DWORD stringLength);
 extern FCDECL1(StringObject*, UnframedAllocateString, DWORD stringLength);
 extern FCDECL1(StringObject*, FramedAllocateString, DWORD stringLength);
+
+#ifdef FEATURE_UTF8STRING
+extern FCDECL1(Utf8StringObject*, AllocateUtf8String_MP_FastPortable, DWORD stringLength);
+extern FCDECL1(Utf8StringObject*, FramedAllocateUtf8String, DWORD stringLength);
+#endif // FEATURE_UTF8STRING
 
 extern FCDECL2(Object*, JIT_NewArr1VC_MP_FastPortable, CORINFO_CLASS_HANDLE arrayMT, INT_PTR size);
 extern FCDECL2(Object*, JIT_NewArr1OBJ_MP_FastPortable, CORINFO_CLASS_HANDLE arrayMT, INT_PTR size);
@@ -339,13 +343,13 @@ private:
 
 #endif // _TARGET_AMD64_
 
-#ifdef _WIN64
+#ifdef BIT64
 EXTERN_C FCDECL1(Object*, JIT_TrialAllocSFastMP_InlineGetThread, CORINFO_CLASS_HANDLE typeHnd_);
 EXTERN_C FCDECL2(Object*, JIT_BoxFastMP_InlineGetThread, CORINFO_CLASS_HANDLE type, void* data);
 EXTERN_C FCDECL2(Object*, JIT_NewArr1VC_MP_InlineGetThread, CORINFO_CLASS_HANDLE arrayMT, INT_PTR size);
 EXTERN_C FCDECL2(Object*, JIT_NewArr1OBJ_MP_InlineGetThread, CORINFO_CLASS_HANDLE arrayMT, INT_PTR size);
 
-#endif // _WIN64
+#endif // BIT64
 
 EXTERN_C FCDECL2_VV(INT64, JIT_LMul, INT64 val1, INT64 val2);
 
@@ -411,7 +415,7 @@ void ValidateWriteBarrierHelpers();
 
 extern "C"
 {
-#ifndef WIN64EXCEPTIONS
+#ifndef FEATURE_EH_FUNCLETS
     void STDCALL JIT_EndCatch();               // JIThelp.asm/JIThelp.s
 #endif // _TARGET_X86_
 
@@ -481,6 +485,7 @@ public:
                                   BOOL fFullInst,
                                   BOOL fAssembly);
     BOOL isValueClass (CORINFO_CLASS_HANDLE cls);
+    CorInfoInlineTypeCheck canInlineTypeCheck (CORINFO_CLASS_HANDLE cls, CorInfoInlineTypeCheckSource source);
     BOOL canInlineTypeCheckWithObjectVTable (CORINFO_CLASS_HANDLE cls);
 
     DWORD getClassAttribs (CORINFO_CLASS_HANDLE cls);
@@ -515,8 +520,8 @@ public:
     // considered when checking visibility rules.
     
 
-    CorInfoHelpFunc getNewHelper(CORINFO_RESOLVED_TOKEN * pResolvedToken, CORINFO_METHOD_HANDLE callerHandle);
-    static CorInfoHelpFunc getNewHelperStatic(MethodTable * pMT);
+    CorInfoHelpFunc getNewHelper(CORINFO_RESOLVED_TOKEN * pResolvedToken, CORINFO_METHOD_HANDLE callerHandle, bool * pHasSideEffects = NULL);
+    static CorInfoHelpFunc getNewHelperStatic(MethodTable * pMT, bool * pHasSideEffects = NULL);
 
     CorInfoHelpFunc getNewArrHelper(CORINFO_CLASS_HANDLE arrayCls);
     static CorInfoHelpFunc getNewArrHelperStatic(TypeHandle clsHnd);
@@ -595,6 +600,13 @@ public:
 
     // returns is the intersection of cls1 and cls2.
     CORINFO_CLASS_HANDLE mergeClasses(
+            CORINFO_CLASS_HANDLE        cls1,
+            CORINFO_CLASS_HANDLE        cls2
+            );
+
+    // Returns true if cls2 is known to be a more specific type
+    // than cls1 (a subtype or more restrictive shared type).
+    BOOL isMoreSpecificType(
             CORINFO_CLASS_HANDLE        cls1,
             CORINFO_CLASS_HANDLE        cls2
             );
@@ -688,7 +700,7 @@ public:
 
     // ICorMethodInfo stuff
     const char* getMethodName (CORINFO_METHOD_HANDLE ftnHnd, const char** scopeName);
-    const char* getMethodNameFromMetadata (CORINFO_METHOD_HANDLE ftnHnd, const char** className, const char** namespaceName);
+    const char* getMethodNameFromMetadata (CORINFO_METHOD_HANDLE ftnHnd, const char** className, const char** namespaceName, const char **enclosingClassName);
     unsigned getMethodHash (CORINFO_METHOD_HANDLE ftnHnd);
 
     DWORD getMethodAttribs (CORINFO_METHOD_HANDLE ftnHnd);
@@ -852,6 +864,8 @@ public:
     bool isWriteBarrierHelperRequired(CORINFO_FIELD_HANDLE field);
 
     void* getFieldAddress(CORINFO_FIELD_HANDLE field, void **ppIndirection);
+
+    CORINFO_CLASS_HANDLE getStaticFieldCurrentClass(CORINFO_FIELD_HANDLE field, bool* pIsSpeculative);
 
     // ICorDebugInfo stuff
     void * allocateArray(ULONG cBytes);
@@ -1074,16 +1088,16 @@ public:
     void logSQMLongJitEvent(unsigned mcycles, unsigned msec, unsigned ilSize, unsigned numBasicBlocks, bool minOpts, 
                             CORINFO_METHOD_HANDLE methodHnd);
 
-    HRESULT allocBBProfileBuffer (
-            ULONG                 count,           // The number of basic blocks that we have
-            ProfileBuffer **      profileBuffer
+    HRESULT allocMethodBlockCounts (
+            UINT32                count,           // the count of <ILOffset, ExecutionCount> tuples
+            BlockCounts **        pBlockCounts     // pointer to array of <ILOffset, ExecutionCount> tuples
             );
 
-    HRESULT getBBProfileData(
+    HRESULT getMethodBlockCounts(
             CORINFO_METHOD_HANDLE ftnHnd,
-            ULONG *               count,           // The number of basic blocks that we have
-            ProfileBuffer **      profileBuffer,
-            ULONG *               numRuns
+            UINT32 *              pCount,          // pointer to the count of <ILOffset, ExecutionCount> tuples
+            BlockCounts **        pBlockCounts,    // pointer to array of <ILOffset, ExecutionCount> tuples
+            UINT32 *              pNumRuns
             );
 
     void recordCallSite(
@@ -1281,16 +1295,16 @@ public:
             );
 
 
-    HRESULT allocBBProfileBuffer (
-        ULONG                         count,            // The number of basic blocks that we have
-        ICorJitInfo::ProfileBuffer ** profileBuffer
+    HRESULT allocMethodBlockCounts (
+        UINT32                        count,         // the count of <ILOffset, ExecutionCount> tuples
+        ICorJitInfo::BlockCounts **   pBlockCounts   // pointer to array of <ILOffset, ExecutionCount> tuples
     );
 
-    HRESULT getBBProfileData (
+    HRESULT getMethodBlockCounts(
         CORINFO_METHOD_HANDLE         ftnHnd,
-        ULONG *                       count,            // The number of basic blocks that we have
-        ICorJitInfo::ProfileBuffer ** profileBuffer,
-        ULONG *                       numRuns
+        UINT32 *                      pCount,        // pointer to the count of <ILOffset, ExecutionCount> tuples
+        BlockCounts **                pBlockCounts,  // pointer to array of <ILOffset, ExecutionCount> tuples
+        UINT32 *                      pNumRuns
     );
 
     void recordCallSite(
@@ -1329,7 +1343,6 @@ public:
     void ResetForJitRetry()
     {
         CONTRACTL {
-            SO_TOLERANT;
             NOTHROW;
             GC_NOTRIGGER;
         } CONTRACTL_END;
@@ -1347,14 +1360,14 @@ public:
         m_iNativeVarInfo = 0;
         m_pNativeVarInfo = NULL;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         m_moduleBase = NULL;
         m_totalUnwindSize = 0;
         m_usedUnwindSize = 0;
         m_theUnwindBlock = NULL;
         m_totalUnwindInfos = 0;
         m_usedUnwindInfos = 0;
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
     }
 
 #ifdef _TARGET_AMD64_
@@ -1415,7 +1428,7 @@ public:
           m_jitManager(jm),
           m_CodeHeader(NULL),
           m_ILHeader(header),
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
           m_moduleBase(NULL),
           m_totalUnwindSize(0),
           m_usedUnwindSize(0),
@@ -1492,6 +1505,7 @@ public:
     InfoAccessType constructStringLiteral(CORINFO_MODULE_HANDLE scopeHnd, mdToken metaTok, void **ppValue);
     InfoAccessType emptyStringLiteral(void ** ppValue);
     void* getFieldAddress(CORINFO_FIELD_HANDLE field, void **ppIndirection);
+    CORINFO_CLASS_HANDLE getStaticFieldCurrentClass(CORINFO_FIELD_HANDLE field, bool* pIsSpeculative);
     void* getMethodSync(CORINFO_METHOD_HANDLE ftnHnd, void **ppIndirection);
 
     void BackoutJitData(EEJitManager * jitMgr);
@@ -1500,7 +1514,7 @@ protected :
     EEJitManager*           m_jitManager;   // responsible for allocating memory
     CodeHeader*             m_CodeHeader;   // descriptor for JITTED code
     COR_ILMETHOD_DECODER *  m_ILHeader;     // the code header as exist in the file
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
     TADDR                   m_moduleBase;       // Base for unwind Infos
     ULONG                   m_totalUnwindSize;  // Total reserved unwind space
     ULONG                   m_usedUnwindSize;   // used space in m_theUnwindBlock
@@ -1634,11 +1648,10 @@ EXTERN_C void JIT_TailCallHelperStub_ReturnAddress();
 void *GenFastGetSharedStaticBase(bool bCheckCCtor);
 
 #ifdef HAVE_GCCOVER
-void SetupGcCoverage(MethodDesc* pMD, BYTE* nativeCode);
+void SetupGcCoverage(NativeCodeVersion nativeCodeVersion, BYTE* nativeCode);
 void SetupGcCoverageForNativeImage(Module* module);
-bool IsGcCoverageInterrupt(LPVOID ip);
 BOOL OnGcCoverageInterrupt(PT_CONTEXT regs);
-void DoGcStress (PT_CONTEXT regs, MethodDesc *pMD);
+void DoGcStress (PT_CONTEXT regs, NativeCodeVersion nativeCodeVersion);
 #endif //HAVE_GCCOVER
 
 EXTERN_C FCDECL2(LPVOID, ArrayStoreCheck, Object** pElement, PtrArray** pArray);
@@ -1654,7 +1667,7 @@ EXTERN_C FCDECL0(VOID, JIT_PollGC_Nop);
 BOOL ObjIsInstanceOf(Object *pObject, TypeHandle toTypeHnd, BOOL throwCastException = FALSE);
 EXTERN_C TypeHandle::CastResult STDCALL ObjIsInstanceOfNoGC(Object *pObject, TypeHandle toTypeHnd);
 
-#ifdef _WIN64
+#ifdef BIT64
 class InlinedCallFrame;
 Thread * __stdcall JIT_InitPInvokeFrame(InlinedCallFrame *pFrame, PTR_VOID StubSecretArg);
 #endif
@@ -1702,13 +1715,9 @@ CORINFO_GENERIC_HANDLE JIT_GenericHandleWorker(MethodDesc   *pMD,
 
 void ClearJitGenericHandleCache(AppDomain *pDomain);
 
-class JitHelpers {
-public:
-    static FCDECL3(void, UnsafeSetArrayElement, PtrArray* pPtrArray, INT32 index, Object* object);
-};
-
 CORJIT_FLAGS GetDebuggerCompileFlags(Module* pModule, CORJIT_FLAGS flags);
 
 bool __stdcall TrackAllocationsEnabled();
 
 #endif // JITINTERFACE_H
+

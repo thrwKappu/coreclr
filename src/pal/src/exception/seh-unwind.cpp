@@ -19,10 +19,6 @@ Abstract:
 
 --*/
 
-#ifndef FEATURE_PAL_SXS
-#error FEATURE_PAL_SXS needs to be defined for this file.
-#endif // !FEATURE_PAL_SXS
-
 #include "pal/context.h"
 #include "pal.h"
 #include <dlfcn.h>
@@ -31,10 +27,14 @@ Abstract:
 // Sub-headers included from the libunwind.h contain an empty struct
 // and clang issues a warning. Until the libunwind is fixed, disable
 // the warning.
+#ifdef __llvm__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wextern-c-compat"
+#endif
 #include <libunwind.h>
+#ifdef __llvm__
 #pragma clang diagnostic pop
+#endif
 
 //----------------------------------------------------------------------
 // Virtual Unwinding
@@ -444,7 +444,7 @@ Note:
 --*/
 PAL_NORETURN
 __attribute__((noinline))
-__attribute__((optnone))
+__attribute__((NOOPT_ATTRIBUTE))
 static void 
 RtlpRaiseException(EXCEPTION_RECORD *ExceptionRecord, CONTEXT *ContextRecord)
 {

@@ -10,11 +10,39 @@ set(MDRUNTIMERW_SOURCES
   mdinternalrw.cpp
 )
 
-convert_to_absolute_path(MDRUNTIMERW_SOURCES ${MDRUNTIMERW_SOURCES})
+set(MDRUNTIMERW_HEADERS
+  ../../inc/corhdr.h
+  ../../inc/metadata.h
+  ../../inc/pedecoder.h
+  ../../inc/pedecoder.inl
+  ../../inc/posterror.h
+  ../../inc/sstring.h
+  ../../inc/sstring.inl
+  ../compiler/importhelper.h
+  ../compiler/regmeta.h
+  ../hotdata/hotdataformat.h
+  ../inc/liteweightstgdb.h
+  ../inc/mdfileformat.h
+  ../inc/mdinternalrw.h
+  ../inc/mdlog.h
+  ../inc/metadatahash.h
+  ../inc/metamodel.h
+  ../inc/metamodelro.h
+  ../inc/metamodelrw.h
+  ../inc/rwutil.h
+  ../inc/stgio.h
+  ../inc/stgtiggerstorage.h
+  ../inc/stgtiggerstream.h
+  ../inc/streamutil.h
+  ../runtime/mdinternalro.h
+)
 
-if(CLR_CMAKE_PLATFORM_UNIX)
-    add_compile_options(-fPIC)
-endif(CLR_CMAKE_PLATFORM_UNIX)
+if (WIN32)
+  list(APPEND MDRUNTIMERW_SOURCES ${MDRUNTIMERW_HEADERS})
+endif(WIN32)
+
+convert_to_absolute_path(MDRUNTIMERW_HEADERS ${MDRUNTIMERW_HEADERS})
+convert_to_absolute_path(MDRUNTIMERW_SOURCES ${MDRUNTIMERW_SOURCES})
 
 add_subdirectory(dac)
 add_subdirectory(wks)

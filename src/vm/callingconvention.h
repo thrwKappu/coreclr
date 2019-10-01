@@ -49,9 +49,25 @@ struct ArgLocDesc
 
 #endif // UNIX_AMD64_ABI
 
+#ifdef FEATURE_HFA
+    static unsigned getHFAFieldSize(CorElementType  hfaType)
+    {
+        switch (hfaType)
+        {
+        case ELEMENT_TYPE_R4: return 4;
+        case ELEMENT_TYPE_R8: return 8;
+            // We overload VALUETYPE for 16-byte vectors.
+        case ELEMENT_TYPE_VALUETYPE: return 16;
+        default: _ASSERTE(!"Invalid HFA Type"); return 0;
+        }
+    }
+#endif
 #if defined(_TARGET_ARM64_)
-    bool    m_isSinglePrecision;  // For determining if HFA is single or double
-                                  // precision
+    unsigned m_hfaFieldSize;      // Size of HFA field in bytes.
+    void setHFAFieldSize(CorElementType  hfaType)
+    {
+        m_hfaFieldSize = getHFAFieldSize(hfaType);
+    }
 #endif // defined(_TARGET_ARM64_)
 
 #if defined(_TARGET_ARM_)
@@ -76,7 +92,7 @@ struct ArgLocDesc
         m_fRequires64BitAlignment = FALSE;
 #endif
 #if defined(_TARGET_ARM64_)
-        m_isSinglePrecision = FALSE;
+        m_hfaFieldSize = 0;
 #endif // defined(_TARGET_ARM64_)
 #if defined(UNIX_AMD64_ABI)
         m_eeClass = NULL;
@@ -142,6 +158,16 @@ struct TransitionBlock
         LIMITED_METHOD_CONTRACT;
         return offsetof(TransitionBlock, m_x8RetBuffReg);
     }
+    
+    static int GetOffsetOfFirstGCRefMapSlot()
+    {
+        return GetOffsetOfRetBuffArgReg();
+    }
+#else
+    static int GetOffsetOfFirstGCRefMapSlot()
+    {
+        return GetOffsetOfArgumentRegisters();
+    }
 #endif
 
     static BYTE GetOffsetOfArgs()
@@ -169,7 +195,7 @@ struct TransitionBlock
         LIMITED_METHOD_CONTRACT;
 
 #if defined(UNIX_AMD64_ABI)
-        return offset >= sizeof(TransitionBlock);
+        return offset >= (int)sizeof(TransitionBlock);
 #else        
         int ofsArgRegs = GetOffsetOfArgumentRegisters();
 
@@ -573,16 +599,15 @@ public:
 
         if (TransitionBlock::IsFloatArgumentRegisterOffset(argOffset))
         {
-            // Dividing by 8 as size of each register in FloatArgumentRegisters is 8 bytes.
-            pLoc->m_idxFloatReg = (argOffset - TransitionBlock::GetOffsetOfFloatArgumentRegisters()) / 8;
+            // Dividing by 16 as size of each register in FloatArgumentRegisters is 16 bytes.
+            pLoc->m_idxFloatReg = (argOffset - TransitionBlock::GetOffsetOfFloatArgumentRegisters()) / 16;
 
             if (!m_argTypeHandle.IsNull() && m_argTypeHandle.IsHFA())
             {
                 CorElementType type = m_argTypeHandle.GetHFAType();
-                bool isFloatType = (type == ELEMENT_TYPE_R4);
+                pLoc->setHFAFieldSize(type);
+                pLoc->m_cFloatReg = GetArgSize()/pLoc->m_hfaFieldSize;
 
-                pLoc->m_cFloatReg = isFloatType ? GetArgSize()/sizeof(float): GetArgSize()/sizeof(double);
-                pLoc->m_isSinglePrecision = isFloatType;
             }
             else
             {
@@ -1015,9 +1040,8 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
 
     case ELEMENT_TYPE_VALUETYPE:
     {
-#ifdef UNIX_AMD64_ABI
         MethodTable *pMT = m_argTypeHandle.GetMethodTable();
-        if (pMT->IsRegPassedStruct())
+        if (this->IsRegPassedStruct(pMT))
         {
             EEClass* eeClass = pMT->GetClass();
             cGenRegs = 0;
@@ -1061,10 +1085,6 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
         // Set the register counts to indicate that this argument will not be passed in registers
         cFPRegs = 0;
         cGenRegs = 0;
-#else // UNIX_AMD64_ABI
-        argSize = sizeof(TADDR);        
-#endif // UNIX_AMD64_ABI
-
         break;
     }
 
@@ -1086,9 +1106,7 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
         return argOfs;
     }
 
-#if defined(UNIX_AMD64_ABI)
-    m_fArgInRegisters = false;
-#endif        
+    m_fArgInRegisters = false;     
 
     int argOfs = TransitionBlock::GetOffsetOfArgs() + m_idxStack * STACK_ELEM_SIZE;
 
@@ -1294,17 +1312,19 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
         if (thValueType.IsHFA())
         {
             CorElementType type = thValueType.GetHFAType();
-            bool isFloatType = (type == ELEMENT_TYPE_R4);
-
-            cFPRegs = (type == ELEMENT_TYPE_R4)? (argSize/sizeof(float)): (argSize/sizeof(double));
 
             m_argLocDescForStructInRegs.Init();
-            m_argLocDescForStructInRegs.m_cFloatReg = cFPRegs;
             m_argLocDescForStructInRegs.m_idxFloatReg = m_idxFPReg;
 
-            m_argLocDescForStructInRegs.m_isSinglePrecision = isFloatType;
-                
-            m_hasArgLocDescForStructInRegs = true;
+            m_argLocDescForStructInRegs.setHFAFieldSize(type);
+            cFPRegs = argSize/m_argLocDescForStructInRegs.m_hfaFieldSize;
+            m_argLocDescForStructInRegs.m_cFloatReg = cFPRegs;
+
+            // Check if we have enough registers available for the HFA passing
+            if ((cFPRegs + m_idxFPReg) <= 8)
+            {
+                m_hasArgLocDescForStructInRegs = true;
+            }
         }
         else 
         {
@@ -1329,7 +1349,8 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
     {
         if (cFPRegs + m_idxFPReg <= 8)
         {
-            int argOfs = TransitionBlock::GetOffsetOfFloatArgumentRegisters() + m_idxFPReg * 8;
+            // Each floating point register in the argument area is 16 bytes.
+            int argOfs = TransitionBlock::GetOffsetOfFloatArgumentRegisters() + m_idxFPReg * 16;
             m_idxFPReg += cFPRegs;
             return argOfs;
         }
@@ -1470,10 +1491,8 @@ void ArgIteratorTemplate<ARGITERATOR_BASE>::ComputeReturnFlags()
             {
                 CorElementType hfaType = thValueType.GetHFAType();
 
-                flags |= (hfaType == ELEMENT_TYPE_R4) ? 
-                    ((4 * sizeof(float)) << RETURN_FP_SIZE_SHIFT) : 
-                    ((4 * sizeof(double)) << RETURN_FP_SIZE_SHIFT);
-
+                int hfaFieldSize = ArgLocDesc::getHFAFieldSize(hfaType);
+                flags |= ((4 * hfaFieldSize) << RETURN_FP_SIZE_SHIFT);
                 break;
             }
 #endif
@@ -1699,6 +1718,11 @@ protected:
     {
         WRAPPER_NO_CONTRACT;
         m_pSig->Reset();
+    }
+
+    FORCEINLINE BOOL IsRegPassedStruct(MethodTable* pMT)
+    {
+        return pMT->IsRegPassedStruct();
     }
 
 public:

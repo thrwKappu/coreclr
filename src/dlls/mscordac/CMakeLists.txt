@@ -1,10 +1,6 @@
 include(${CLR_DIR}/dac.cmake)
 add_definitions(-DFEATURE_NO_HOST)
 
-if(CLR_CMAKE_PLATFORM_UNIX)
-    add_compile_options(-fPIC)
-endif(CLR_CMAKE_PLATFORM_UNIX)
-
 set(CLR_DAC_SOURCES
 )
 
@@ -124,8 +120,10 @@ set(COREDAC_LIBRARIES
     ${START_LIBRARY_GROUP} # Start group of libraries that have circular references
     cee_dac
     cordbee_dac
+    ${START_WHOLE_ARCHIVE} # force all exports to be available  
     corguids
     daccess
+    ${END_WHOLE_ARCHIVE}
     dbgutil
     mdcompiler_dac
     mdhotdata_dac
@@ -177,8 +175,8 @@ else(WIN32)
         mscorrc_debug
         ${START_WHOLE_ARCHIVE} # force all PAL objects to be included so all exports are available  
         coreclrpal
-        ${END_WHOLE_ARCHIVE}
         palrt
+        ${END_WHOLE_ARCHIVE}
     )
 endif(WIN32)
 

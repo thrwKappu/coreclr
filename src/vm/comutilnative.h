@@ -61,6 +61,7 @@ public:
     // Note: these are on the PInvoke class to hide these from the user.
     static FCDECL0(EXCEPTION_POINTERS*, GetExceptionPointers);
     static FCDECL0(INT32, GetExceptionCode);
+    static FCDECL0(UINT32, GetExceptionCount);
 };
 
 class MemoryNative
@@ -80,8 +81,6 @@ public:
     // This method from one primitive array to another based
     //      upon an offset into each an a byte count.
     static FCDECL5(VOID, BlockCopy, ArrayBase *src, int srcOffset, ArrayBase *dst, int dstOffset, int count);
-    static FCDECL2(FC_UINT8_RET, GetByte, ArrayBase *arrayUNSAFE, INT32 index);
-    static FCDECL3(VOID, SetByte, ArrayBase *arrayUNSAFE, INT32 index, UINT8 bData);
     static FCDECL1(FC_BOOL_RET, IsPrimitiveTypeArray, ArrayBase *arrayUNSAFE);
     static FCDECL1(INT32, ByteLength, ArrayBase *arrayUNSAFE);
 
@@ -111,7 +110,7 @@ public:
     static FORCEINLINE UINT64 InterlockedAdd(UINT64 *pAugend, UINT64 addend);
     static FORCEINLINE UINT64 InterlockedSub(UINT64 *pMinuend, UINT64 subtrahend);
 
-    static FCDECL5(void,    GetMemoryInfo, UINT32* highMemLoadThreshold, UINT64* totalPhysicalMem, UINT32* lastRecordedMemLoad, size_t* lastRecordedHeapSize, size_t* lastRecordedFragmentation);
+    static FCDECL6(void,    GetMemoryInfo, UINT64* highMemLoadThresholdBytes, UINT64* totalAvailableMemoryBytes, UINT64* lastRecordedMemLoadBytes, UINT32* lastRecordedMemLoadPct, size_t* lastRecordedHeapSizBytes, size_t* lastRecordedFragmentationBytes);
     static FCDECL0(int,     GetGcLatencyMode);
     static FCDECL1(int,     SetGcLatencyMode, int newLatencyMode);
     static FCDECL0(int,     GetLOHCompactionMode);
@@ -122,7 +121,9 @@ public:
     static FCDECL1(int,     WaitForFullGCComplete, int millisecondsTimeout);
     static FCDECL1(int,     GetGenerationWR, LPVOID handle);
     static FCDECL1(int,     GetGeneration, Object* objUNSAFE);
-
+    static FCDECL0(UINT64,  GetSegmentSize);
+    static FCDECL0(int,     GetLastGCPercentTimeInGC);
+    static FCDECL1(UINT64,  GetGenerationSize, int gen);
     static 
     INT64 QCALLTYPE GetTotalMemory();
 
@@ -139,6 +140,17 @@ public:
     static FCDECL2(int,     CollectionCount, INT32 generation, INT32 getSpecialGCCount);
     
     static FCDECL0(INT64,    GetAllocatedBytesForCurrentThread);
+    static FCDECL1(INT64,    GetTotalAllocatedBytes, CLR_BOOL precise);
+
+    static FCDECL3(Object*, AllocateNewArray, void* elementTypeHandle, INT32 length, CLR_BOOL zeroingOptional);
+
+#ifdef FEATURE_BASICFREEZE
+    static
+    void* QCALLTYPE RegisterFrozenSegment(void *pSection, SIZE_T sizeSection);
+
+    static
+    void QCALLTYPE UnregisterFrozenSegment(void *segmentHandle);
+#endif // FEATURE_BASICFREEZE
 
     static 
     int QCALLTYPE StartNoGCRegion(INT64 totalSize, BOOL lohSizeKnown, INT64 lohSize, BOOL disallowFullBlockingGC);

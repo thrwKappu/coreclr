@@ -39,17 +39,35 @@ const HWIntrinsicInfo& HWIntrinsicInfo::lookup(NamedIntrinsic id)
 // Arguments:
 //    className  -- The name of the class associated with the HWIntrinsic to lookup
 //    methodName -- The name of the method associated with the HWIntrinsic to lookup
+//    enclosingClassName -- The name of the enclosing class of X64 classes
 //
 // Return Value:
 //    The NamedIntrinsic associated with methodName and isa
-NamedIntrinsic HWIntrinsicInfo::lookupId(const char* className, const char* methodName)
+NamedIntrinsic HWIntrinsicInfo::lookupId(Compiler*   comp,
+                                         const char* className,
+                                         const char* methodName,
+                                         const char* enclosingClassName)
 {
     // TODO-Throughput: replace sequential search by binary search
+    InstructionSet isa = lookupIsa(className, enclosingClassName);
 
-    InstructionSet isa = lookupIsa(className);
-    assert(isa != InstructionSet_ILLEGAL);
+    if (isa == InstructionSet_ILLEGAL)
+    {
+        // There are several platform-agnostic intrinsics (e.g., Vector64) that
+        // are not supported in x86, so early return NI_Illegal
+        return NI_Illegal;
+    }
 
-    assert(methodName != nullptr);
+    bool isIsaSupported = comp->compSupports(isa) && comp->compSupportsHWIntrinsic(isa);
+
+    if (strcmp(methodName, "get_IsSupported") == 0)
+    {
+        return isIsaSupported ? NI_IsSupported_True : NI_IsSupported_False;
+    }
+    else if (!isIsaSupported)
+    {
+        return NI_Throw_PlatformNotSupportedException;
+    }
 
     for (int i = 0; i < (NI_HW_INTRINSIC_END - NI_HW_INTRINSIC_START - 1); i++)
     {
@@ -70,17 +88,49 @@ NamedIntrinsic HWIntrinsicInfo::lookupId(const char* className, const char* meth
 }
 
 //------------------------------------------------------------------------
-// lookupIsa: Gets the InstructionSet for a given class name
+// X64VersionOfIsa: Gets the corresponding 64-bit only InstructionSet for a given InstructionSet
+//
+// Arguments:
+//    isa -- The InstructionSet ID
+//
+// Return Value:
+//    The 64-bit only InstructionSet associated with isa
+static InstructionSet X64VersionOfIsa(InstructionSet isa)
+{
+    switch (isa)
+    {
+        case InstructionSet_SSE:
+            return InstructionSet_SSE_X64;
+        case InstructionSet_SSE2:
+            return InstructionSet_SSE2_X64;
+        case InstructionSet_SSE41:
+            return InstructionSet_SSE41_X64;
+        case InstructionSet_SSE42:
+            return InstructionSet_SSE42_X64;
+        case InstructionSet_BMI1:
+            return InstructionSet_BMI1_X64;
+        case InstructionSet_BMI2:
+            return InstructionSet_BMI2_X64;
+        case InstructionSet_LZCNT:
+            return InstructionSet_LZCNT_X64;
+        case InstructionSet_POPCNT:
+            return InstructionSet_POPCNT_X64;
+        default:
+            unreached();
+    }
+}
+
+//------------------------------------------------------------------------
+// lookupInstructionSet: Gets the InstructionSet for a given class name
 //
 // Arguments:
 //    className -- The name of the class associated with the InstructionSet to lookup
 //
 // Return Value:
 //    The InstructionSet associated with className
-InstructionSet HWIntrinsicInfo::lookupIsa(const char* className)
+static InstructionSet lookupInstructionSet(const char* className)
 {
     assert(className != nullptr);
-
     if (className[0] == 'A')
     {
         if (strcmp(className, "Aes") == 0)
@@ -145,6 +195,17 @@ InstructionSet HWIntrinsicInfo::lookupIsa(const char* className)
             return InstructionSet_POPCNT;
         }
     }
+    else if (className[0] == 'V')
+    {
+        if (strncmp(className, "Vector128", 9) == 0)
+        {
+            return InstructionSet_Vector128;
+        }
+        else if (strncmp(className, "Vector256", 9) == 0)
+        {
+            return InstructionSet_Vector256;
+        }
+    }
     else if (strcmp(className, "Fma") == 0)
     {
         return InstructionSet_FMA;
@@ -154,8 +215,31 @@ InstructionSet HWIntrinsicInfo::lookupIsa(const char* className)
         return InstructionSet_LZCNT;
     }
 
-    unreached();
     return InstructionSet_ILLEGAL;
+}
+
+//------------------------------------------------------------------------
+// lookupIsa: Gets the InstructionSet for a given class name and enclsoing class name
+//
+// Arguments:
+//    className -- The name of the class associated with the InstructionSet to lookup
+//    enclosingClassName -- The name of the enclosing class of X64 classes
+//
+// Return Value:
+//    The InstructionSet associated with className and enclosingClassName
+InstructionSet HWIntrinsicInfo::lookupIsa(const char* className, const char* enclosingClassName)
+{
+    assert(className != nullptr);
+
+    if (strcmp(className, "X64") == 0)
+    {
+        assert(enclosingClassName != nullptr);
+        return X64VersionOfIsa(lookupInstructionSet(enclosingClassName));
+    }
+    else
+    {
+        return lookupInstructionSet(className);
+    }
 }
 
 //------------------------------------------------------------------------
@@ -311,10 +395,7 @@ GenTree* HWIntrinsicInfo::lookupLastOp(const GenTreeHWIntrinsic* node)
         }
 
         default:
-        {
             unreached();
-            return nullptr;
-        }
     }
 }
 
@@ -442,27 +523,32 @@ bool HWIntrinsicInfo::isFullyImplementedIsa(InstructionSet isa)
 {
     switch (isa)
     {
-        // These ISAs are partially implemented
-        case InstructionSet_AVX2:
-        case InstructionSet_BMI1:
-        case InstructionSet_BMI2:
-        case InstructionSet_SSE42:
-        {
-            return true;
-        }
-
         // These ISAs are fully implemented
         case InstructionSet_AES:
         case InstructionSet_AVX:
+        case InstructionSet_AVX2:
+        case InstructionSet_BMI1:
+        case InstructionSet_BMI2:
+        case InstructionSet_BMI1_X64:
+        case InstructionSet_BMI2_X64:
         case InstructionSet_FMA:
         case InstructionSet_LZCNT:
+        case InstructionSet_LZCNT_X64:
         case InstructionSet_PCLMULQDQ:
         case InstructionSet_POPCNT:
+        case InstructionSet_POPCNT_X64:
         case InstructionSet_SSE:
+        case InstructionSet_SSE_X64:
         case InstructionSet_SSE2:
+        case InstructionSet_SSE2_X64:
         case InstructionSet_SSE3:
         case InstructionSet_SSSE3:
         case InstructionSet_SSE41:
+        case InstructionSet_SSE41_X64:
+        case InstructionSet_SSE42:
+        case InstructionSet_SSE42_X64:
+        case InstructionSet_Vector128:
+        case InstructionSet_Vector256:
         {
             return true;
         }
@@ -488,8 +574,12 @@ bool HWIntrinsicInfo::isScalarIsa(InstructionSet isa)
     {
         case InstructionSet_BMI1:
         case InstructionSet_BMI2:
+        case InstructionSet_BMI1_X64:
+        case InstructionSet_BMI2_X64:
         case InstructionSet_LZCNT:
+        case InstructionSet_LZCNT_X64:
         case InstructionSet_POPCNT:
+        case InstructionSet_POPCNT_X64:
         {
             return true;
         }
@@ -566,7 +656,6 @@ GenTree* Compiler::impNonConstFallback(NamedIntrinsic intrinsic, var_types simdT
 
         default:
             unreached();
-            return nullptr;
     }
 }
 
@@ -621,52 +710,18 @@ GenTree* Compiler::addRangeCheckIfNeeded(NamedIntrinsic intrinsic, GenTree* last
 // Arguments:
 //    isa - Instruction set
 // Return Value:
-//    true if
+//    true if EnableHWIntrinsic=true and
 //    - isa is a scalar ISA
 //    - isa is a SIMD ISA and featureSIMD=true
 //    - isa is fully implemented or EnableIncompleteISAClass=true
 bool Compiler::compSupportsHWIntrinsic(InstructionSet isa)
 {
-    return (featureSIMD || HWIntrinsicInfo::isScalarIsa(isa)) && (
+    return JitConfig.EnableHWIntrinsic() && (featureSIMD || HWIntrinsicInfo::isScalarIsa(isa)) &&
+           (
 #ifdef DEBUG
-                                                                     JitConfig.EnableIncompleteISAClass() ||
+               JitConfig.EnableIncompleteISAClass() ||
 #endif
-                                                                     HWIntrinsicInfo::isFullyImplementedIsa(isa));
-}
-
-//------------------------------------------------------------------------
-// hwIntrinsicSignatureTypeSupported: platform support of hardware intrinsics
-//
-// Arguments:
-//    retType - return type
-//    sig     - intrinsic signature
-//
-// Return Value:
-//    Returns true iff the given type signature is supported
-// Notes:
-//    - This is only used on 32-bit systems to determine whether the signature uses no 64-bit registers.
-//    - The `retType` is passed to avoid another call to the type system, as it has already been retrieved.
-bool Compiler::hwIntrinsicSignatureTypeSupported(var_types retType, CORINFO_SIG_INFO* sig, NamedIntrinsic intrinsic)
-{
-#ifdef _TARGET_X86_
-    CORINFO_CLASS_HANDLE argClass;
-
-    if (HWIntrinsicInfo::Is64BitOnly(intrinsic))
-    {
-        return false;
-    }
-    else if (HWIntrinsicInfo::SecondArgMaybe64Bit(intrinsic))
-    {
-        assert(sig->numArgs >= 2);
-        CorInfoType corType =
-            strip(info.compCompHnd->getArgType(sig, info.compCompHnd->getArgNext(sig->args), &argClass));
-        return !varTypeIsLong(JITtype2varType(corType));
-    }
-
-    return !varTypeIsLong(retType);
-#else
-    return true;
-#endif
+               HWIntrinsicInfo::isFullyImplementedIsa(isa));
 }
 
 //------------------------------------------------------------------------
@@ -697,6 +752,7 @@ static bool impIsTableDrivenHWIntrinsic(NamedIntrinsic intrinsicId, HWIntrinsicC
 //    the expanded intrinsic.
 //
 GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
+                                  CORINFO_CLASS_HANDLE  clsHnd,
                                   CORINFO_METHOD_HANDLE method,
                                   CORINFO_SIG_INFO*     sig,
                                   bool                  mustExpand)
@@ -715,23 +771,6 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
         assert(sizeBytes != 0);
     }
 
-    // This intrinsic is supported if
-    // - the ISA is available on the underlying hardware (compSupports returns true)
-    // - the compiler supports this hardware intrinsics (compSupportsHWIntrinsic returns true)
-    // - intrinsics do not require 64-bit registers (r64) on 32-bit platforms (signatureTypeSupproted returns
-    // true)
-    bool issupported =
-        compSupports(isa) && compSupportsHWIntrinsic(isa) && hwIntrinsicSignatureTypeSupported(retType, sig, intrinsic);
-
-    if (category == HW_Category_IsSupportedProperty)
-    {
-        return gtNewIconNode(issupported);
-    }
-    // - calling to unsupported intrinsics must throw PlatforNotSupportedException
-    else if (!issupported)
-    {
-        return impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_PLATFORM_NOT_SUPPORTED, method, sig, mustExpand);
-    }
     // Avoid checking stacktop for 0-op intrinsics
     if (sig->numArgs > 0 && HWIntrinsicInfo::isImmOp(intrinsic, impStackTop().val))
     {
@@ -765,49 +804,6 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
         }
     }
 
-    bool isTableDriven = impIsTableDrivenHWIntrinsic(intrinsic, category);
-
-    if (isTableDriven && ((category == HW_Category_MemoryStore) || HWIntrinsicInfo::BaseTypeFromFirstArg(intrinsic) ||
-                          HWIntrinsicInfo::BaseTypeFromSecondArg(intrinsic)))
-    {
-        if (HWIntrinsicInfo::BaseTypeFromFirstArg(intrinsic))
-        {
-            baseType = getBaseTypeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args));
-        }
-        else
-        {
-            assert((category == HW_Category_MemoryStore) || HWIntrinsicInfo::BaseTypeFromSecondArg(intrinsic));
-            CORINFO_ARG_LIST_HANDLE secondArg      = info.compCompHnd->getArgNext(sig->args);
-            CORINFO_CLASS_HANDLE    secondArgClass = info.compCompHnd->getArgClass(sig, secondArg);
-            baseType                               = getBaseTypeOfSIMDType(secondArgClass);
-
-            if (baseType == TYP_UNKNOWN) // the second argument is not a vector
-            {
-                baseType = JITtype2varType(strip(info.compCompHnd->getArgType(sig, secondArg, &secondArgClass)));
-            }
-        }
-    }
-
-    if ((HWIntrinsicInfo::IsOneTypeGeneric(intrinsic) || HWIntrinsicInfo::IsTwoTypeGeneric(intrinsic)) &&
-        !HWIntrinsicInfo::HasSpecialImport(intrinsic))
-    {
-        if (!varTypeIsArithmetic(baseType))
-        {
-            return impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_TYPE_NOT_SUPPORTED, method, sig, mustExpand);
-        }
-
-        if (HWIntrinsicInfo::IsTwoTypeGeneric(intrinsic))
-        {
-            // StaticCast<T, U> has two type parameters.
-            assert(numArgs == 1);
-            var_types srcType = getBaseTypeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args));
-            if (!varTypeIsArithmetic(srcType))
-            {
-                return impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_TYPE_NOT_SUPPORTED, method, sig, mustExpand);
-            }
-        }
-    }
-
     if (HWIntrinsicInfo::IsFloatingPointUsed(intrinsic))
     {
         // Set `compFloatingPointUsed` to cover the scenario where an intrinsic is being on SIMD fields, but
@@ -816,16 +812,48 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
     }
 
     // table-driven importer of simple intrinsics
-    if (isTableDriven)
+    if (impIsTableDrivenHWIntrinsic(intrinsic, category))
     {
+        if ((category == HW_Category_MemoryStore) || HWIntrinsicInfo::BaseTypeFromFirstArg(intrinsic) ||
+            HWIntrinsicInfo::BaseTypeFromSecondArg(intrinsic))
+        {
+            CORINFO_ARG_LIST_HANDLE arg = sig->args;
+
+            if ((category == HW_Category_MemoryStore) || HWIntrinsicInfo::BaseTypeFromSecondArg(intrinsic))
+            {
+                arg = info.compCompHnd->getArgNext(arg);
+            }
+
+            CORINFO_CLASS_HANDLE argClass = info.compCompHnd->getArgClass(sig, arg);
+            baseType                      = getBaseTypeAndSizeOfSIMDType(argClass);
+
+            if (baseType == TYP_UNKNOWN) // the argument is not a vector
+            {
+                CORINFO_CLASS_HANDLE tmpClass;
+                CorInfoType          corInfoType = strip(info.compCompHnd->getArgType(sig, arg, &tmpClass));
+
+                if (corInfoType == CORINFO_TYPE_PTR)
+                {
+                    corInfoType = info.compCompHnd->getChildType(argClass, &tmpClass);
+                }
+
+                baseType = JITtype2varType(corInfoType);
+            }
+
+            assert(baseType != TYP_UNKNOWN);
+        }
+
         unsigned                simdSize = HWIntrinsicInfo::lookupSimdSize(this, intrinsic, sig);
         CORINFO_ARG_LIST_HANDLE argList  = sig->args;
         CORINFO_CLASS_HANDLE    argClass;
         var_types               argType = TYP_UNKNOWN;
 
         assert(numArgs >= 0);
-        assert(HWIntrinsicInfo::lookupIns(intrinsic, baseType) != INS_invalid);
-        assert(simdSize == 32 || simdSize == 16);
+        if ((HWIntrinsicInfo::lookupIns(intrinsic, baseType) == INS_invalid) || ((simdSize != 32) && (simdSize != 16)))
+        {
+            assert(!"Unexpected HW Intrinsic");
+            return nullptr;
+        }
 
         GenTreeHWIntrinsic* retNode = nullptr;
         GenTree*            op1     = nullptr;
@@ -839,6 +867,15 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
             case 1:
                 argType = JITtype2varType(strip(info.compCompHnd->getArgType(sig, argList, &argClass)));
                 op1     = getArgForHWIntrinsic(argType, argClass);
+                if ((category == HW_Category_MemoryLoad) && op1->OperIs(GT_CAST))
+                {
+                    // Although the API specifies a pointer, if what we have is a BYREF, that's what
+                    // we really want, so throw away the cast.
+                    if (op1->gtGetOp1()->TypeGet() == TYP_BYREF)
+                    {
+                        op1 = op1->gtGetOp1();
+                    }
+                }
                 retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, simdSize);
                 break;
             case 2:
@@ -864,9 +901,9 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
 
                 op3 = addRangeCheckIfNeeded(intrinsic, op3, mustExpand);
 
-                argType = JITtype2varType(strip(info.compCompHnd->getArgType(sig, arg2, &argClass)));
-                op2     = getArgForHWIntrinsic(argType, argClass);
-                var_types op2Type;
+                argType           = JITtype2varType(strip(info.compCompHnd->getArgType(sig, arg2, &argClass)));
+                op2               = getArgForHWIntrinsic(argType, argClass);
+                var_types op2Type = TYP_UNDEF;
                 if (intrinsic == NI_AVX2_GatherVector128 || intrinsic == NI_AVX2_GatherVector256)
                 {
                     assert(varTypeIsSIMD(op2->TypeGet()));
@@ -911,11 +948,15 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
     // other intrinsics need special importation
     switch (isa)
     {
+        case InstructionSet_Vector128:
+        case InstructionSet_Vector256:
+            return impBaseIntrinsic(intrinsic, clsHnd, method, sig, mustExpand);
         case InstructionSet_SSE:
             return impSSEIntrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_SSE2:
             return impSSE2Intrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_SSE42:
+        case InstructionSet_SSE42_X64:
             return impSSE42Intrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_AVX:
         case InstructionSet_AVX2:
@@ -924,20 +965,671 @@ GenTree* Compiler::impHWIntrinsic(NamedIntrinsic        intrinsic,
         case InstructionSet_AES:
             return impAESIntrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_BMI1:
-            return impBMI1Intrinsic(intrinsic, method, sig, mustExpand);
+        case InstructionSet_BMI1_X64:
         case InstructionSet_BMI2:
-            return impBMI2Intrinsic(intrinsic, method, sig, mustExpand);
+        case InstructionSet_BMI2_X64:
+            return impBMI1OrBMI2Intrinsic(intrinsic, method, sig, mustExpand);
+
         case InstructionSet_FMA:
             return impFMAIntrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_LZCNT:
+        case InstructionSet_LZCNT_X64:
             return impLZCNTIntrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_PCLMULQDQ:
             return impPCLMULQDQIntrinsic(intrinsic, method, sig, mustExpand);
         case InstructionSet_POPCNT:
+        case InstructionSet_POPCNT_X64:
             return impPOPCNTIntrinsic(intrinsic, method, sig, mustExpand);
         default:
             return nullptr;
     }
+}
+
+//------------------------------------------------------------------------
+// impBaseIntrinsic: dispatch intrinsics to their own implementation
+//
+// Arguments:
+//    intrinsic  -- id of the intrinsic function.
+//    method     -- method handle of the intrinsic function.
+//    sig        -- signature of the intrinsic call
+//    mustExpand -- true if the compiler is compiling the fallback(GT_CALL) of this intrinsics
+//
+// Return Value:
+//    the expanded intrinsic.
+//
+GenTree* Compiler::impBaseIntrinsic(NamedIntrinsic        intrinsic,
+                                    CORINFO_CLASS_HANDLE  clsHnd,
+                                    CORINFO_METHOD_HANDLE method,
+                                    CORINFO_SIG_INFO*     sig,
+                                    bool                  mustExpand)
+{
+    GenTree* retNode = nullptr;
+    GenTree* op1     = nullptr;
+
+    if (!featureSIMD)
+    {
+        return nullptr;
+    }
+
+    unsigned  simdSize = 0;
+    var_types baseType = TYP_UNKNOWN;
+    var_types retType  = JITtype2varType(sig->retType);
+
+    assert(!sig->hasThis());
+
+    if (HWIntrinsicInfo::BaseTypeFromFirstArg(intrinsic))
+    {
+        baseType = getBaseTypeAndSizeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args), &simdSize);
+
+        if (retType == TYP_STRUCT)
+        {
+            unsigned  retSimdSize = 0;
+            var_types retBasetype = getBaseTypeAndSizeOfSIMDType(sig->retTypeClass, &retSimdSize);
+            if (!varTypeIsArithmetic(retBasetype))
+            {
+                return nullptr;
+            }
+            retType = getSIMDTypeForSize(retSimdSize);
+        }
+    }
+    else if (retType == TYP_STRUCT)
+    {
+        baseType = getBaseTypeAndSizeOfSIMDType(sig->retTypeClass, &simdSize);
+        retType  = getSIMDTypeForSize(simdSize);
+    }
+    else
+    {
+        baseType = getBaseTypeAndSizeOfSIMDType(clsHnd, &simdSize);
+    }
+
+    if (!varTypeIsArithmetic(baseType))
+    {
+        return nullptr;
+    }
+
+    switch (intrinsic)
+    {
+        case NI_Vector256_As:
+        case NI_Vector256_AsByte:
+        case NI_Vector256_AsDouble:
+        case NI_Vector256_AsInt16:
+        case NI_Vector256_AsInt32:
+        case NI_Vector256_AsInt64:
+        case NI_Vector256_AsSByte:
+        case NI_Vector256_AsSingle:
+        case NI_Vector256_AsUInt16:
+        case NI_Vector256_AsUInt32:
+        case NI_Vector256_AsUInt64:
+        {
+            if (!compSupports(InstructionSet_AVX))
+            {
+                // We don't want to deal with TYP_SIMD32 if the compiler doesn't otherwise support the type.
+                break;
+            }
+
+            __fallthrough;
+        }
+
+        case NI_Vector128_As:
+        case NI_Vector128_AsByte:
+        case NI_Vector128_AsDouble:
+        case NI_Vector128_AsInt16:
+        case NI_Vector128_AsInt32:
+        case NI_Vector128_AsInt64:
+        case NI_Vector128_AsSByte:
+        case NI_Vector128_AsSingle:
+        case NI_Vector128_AsUInt16:
+        case NI_Vector128_AsUInt32:
+        case NI_Vector128_AsUInt64:
+        {
+            // We fold away the cast here, as it only exists to satisfy
+            // the type system. It is safe to do this here since the retNode type
+            // and the signature return type are both the same TYP_SIMD.
+
+            assert(sig->numArgs == 1);
+
+            retNode = impSIMDPopStack(retType, /* expectAddr: */ false, sig->retTypeClass);
+            SetOpLclRelatedToSIMDIntrinsic(retNode);
+            assert(retNode->gtType == getSIMDTypeForSize(getSIMDTypeSizeInBytes(sig->retTypeSigClass)));
+            break;
+        }
+
+        case NI_Vector128_Count:
+        case NI_Vector256_Count:
+        {
+            assert(sig->numArgs == 0);
+
+            GenTreeIntCon* countNode = gtNewIconNode(getSIMDVectorLength(simdSize, baseType), TYP_INT);
+            countNode->gtFlags |= GTF_ICON_SIMD_COUNT;
+            retNode = countNode;
+            break;
+        }
+
+        case NI_Vector128_CreateScalarUnsafe:
+        {
+            assert(sig->numArgs == 1);
+
+#ifdef _TARGET_X86_
+            if (varTypeIsLong(baseType))
+            {
+                // TODO-XARCH-CQ: It may be beneficial to emit the movq
+                // instruction, which takes a 64-bit memory address and
+                // works on 32-bit x86 systems.
+                break;
+            }
+#endif // _TARGET_X86_
+
+            if (compSupports(InstructionSet_SSE2) || (compSupports(InstructionSet_SSE) && (baseType == TYP_FLOAT)))
+            {
+                op1     = impPopStack().val;
+                retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, simdSize);
+            }
+            break;
+        }
+
+        case NI_Vector128_ToScalar:
+        {
+            assert(sig->numArgs == 1);
+
+            if (compSupports(InstructionSet_SSE) && varTypeIsFloating(baseType))
+            {
+                op1     = impSIMDPopStack(getSIMDTypeForSize(simdSize));
+                retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, 16);
+            }
+            break;
+        }
+
+        case NI_Vector128_ToVector256:
+        case NI_Vector128_ToVector256Unsafe:
+        case NI_Vector256_GetLower:
+        {
+            assert(sig->numArgs == 1);
+
+            if (compSupports(InstructionSet_AVX))
+            {
+                op1     = impSIMDPopStack(getSIMDTypeForSize(simdSize));
+                retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, simdSize);
+            }
+            break;
+        }
+
+        case NI_Vector128_Zero:
+        {
+            assert(sig->numArgs == 0);
+
+            if (compSupports(InstructionSet_SSE))
+            {
+                retNode = gtNewSimdHWIntrinsicNode(retType, intrinsic, baseType, simdSize);
+            }
+            break;
+        }
+
+        case NI_Vector256_CreateScalarUnsafe:
+        {
+            assert(sig->numArgs == 1);
+
+#ifdef _TARGET_X86_
+            if (varTypeIsLong(baseType))
+            {
+                // TODO-XARCH-CQ: It may be beneficial to emit the movq
+                // instruction, which takes a 64-bit memory address and
+                // works on 32-bit x86 systems.
+                break;
+            }
+#endif // _TARGET_X86_
+
+            if (compSupports(InstructionSet_AVX))
+            {
+                op1     = impPopStack().val;
+                retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, simdSize);
+            }
+            break;
+        }
+
+        case NI_Vector256_ToScalar:
+        {
+            assert(sig->numArgs == 1);
+
+            if (compSupports(InstructionSet_AVX) && varTypeIsFloating(baseType))
+            {
+                op1     = impSIMDPopStack(getSIMDTypeForSize(simdSize));
+                retNode = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, 32);
+            }
+            break;
+        }
+
+        case NI_Vector256_Zero:
+        {
+            assert(sig->numArgs == 0);
+
+            if (compSupports(InstructionSet_AVX))
+            {
+                retNode = gtNewSimdHWIntrinsicNode(retType, intrinsic, baseType, simdSize);
+            }
+            break;
+        }
+
+        case NI_Vector256_WithElement:
+        {
+            if (!compSupports(InstructionSet_AVX))
+            {
+                // Using software fallback if JIT/hardware don't support AVX instructions and YMM registers
+                return nullptr;
+            }
+            __fallthrough;
+        }
+
+        case NI_Vector128_WithElement:
+        {
+            assert(sig->numArgs == 3);
+            GenTree* indexOp = impStackTop(1).val;
+            if (!compSupports(InstructionSet_SSE2) || !varTypeIsArithmetic(baseType) || !indexOp->OperIsConst())
+            {
+                // Using software fallback if
+                // 1. JIT/hardware don't support SSE2 instructions
+                // 2. baseType is not a numeric type (throw execptions)
+                // 3. index is not a constant
+                return nullptr;
+            }
+
+            switch (baseType)
+            {
+                // Using software fallback if baseType is not supported by hardware
+                case TYP_BYTE:
+                case TYP_UBYTE:
+                case TYP_INT:
+                case TYP_UINT:
+                    if (!compSupports(InstructionSet_SSE41))
+                    {
+                        return nullptr;
+                    }
+                    break;
+
+                case TYP_LONG:
+                case TYP_ULONG:
+                    if (!compSupports(InstructionSet_SSE41_X64))
+                    {
+                        return nullptr;
+                    }
+                    break;
+
+                case TYP_DOUBLE:
+                case TYP_FLOAT:
+                case TYP_SHORT:
+                case TYP_USHORT:
+                    // short/ushort/float/double is supported by SSE2
+                    break;
+
+                default:
+                    unreached();
+                    break;
+            }
+
+            ssize_t imm8       = indexOp->AsIntCon()->IconValue();
+            ssize_t cachedImm8 = imm8;
+            ssize_t count      = simdSize / genTypeSize(baseType);
+
+            if (imm8 >= count || imm8 < 0)
+            {
+                // Using software fallback if index is out of range (throw exeception)
+                return nullptr;
+            }
+
+            GenTree* valueOp = impPopStack().val;
+            impPopStack();
+            GenTree* vectorOp = impSIMDPopStack(getSIMDTypeForSize(simdSize));
+
+            GenTree* clonedVectorOp = nullptr;
+
+            if (simdSize == 32)
+            {
+                // Extract the half vector that will be modified
+                assert(compSupports(InstructionSet_AVX));
+
+                // copy `vectorOp` to accept the modified half vector
+                vectorOp = impCloneExpr(vectorOp, &clonedVectorOp, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                        nullptr DEBUGARG("Clone Vector for Vector256<T>.WithElement"));
+
+                if (imm8 >= count / 2)
+                {
+                    imm8 -= count / 2;
+                    vectorOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, gtNewIconNode(1), NI_AVX_ExtractVector128,
+                                                        baseType, simdSize);
+                }
+                else
+                {
+                    vectorOp =
+                        gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, NI_Vector256_GetLower, baseType, simdSize);
+                }
+            }
+
+            GenTree* immNode = gtNewIconNode(imm8);
+
+            switch (baseType)
+            {
+                case TYP_LONG:
+                case TYP_ULONG:
+                    retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, valueOp, immNode, NI_SSE41_X64_Insert,
+                                                       baseType, 16);
+                    break;
+
+                case TYP_FLOAT:
+                {
+                    if (!compSupports(InstructionSet_SSE41))
+                    {
+                        // Emulate Vector128<float>.WithElement by SSE instructions
+                        if (imm8 == 0)
+                        {
+                            // vector.WithElement(0, value)
+                            // =>
+                            // movss   xmm0, xmm1 (xmm0 = vector, xmm1 = value)
+                            valueOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp, NI_Vector128_CreateScalarUnsafe,
+                                                               TYP_FLOAT, 16);
+                            retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, valueOp, NI_SSE_MoveScalar,
+                                                               TYP_FLOAT, 16);
+                        }
+                        else if (imm8 == 1)
+                        {
+                            // vector.WithElement(1, value)
+                            // =>
+                            // shufps  xmm1, xmm0, 0   (xmm0 = vector, xmm1 = value)
+                            // shufps  xmm1, xmm0, 226
+                            GenTree* tmpOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp,
+                                                                      NI_Vector128_CreateScalarUnsafe, TYP_FLOAT, 16);
+                            GenTree* dupVectorOp = nullptr;
+                            vectorOp = impCloneExpr(vectorOp, &dupVectorOp, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                                    nullptr DEBUGARG("Clone Vector for Vector128<float>.WithElement"));
+                            tmpOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, tmpOp, vectorOp, gtNewIconNode(0),
+                                                             NI_SSE_Shuffle, TYP_FLOAT, 16);
+                            retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD16, tmpOp, dupVectorOp, gtNewIconNode(226),
+                                                               NI_SSE_Shuffle, TYP_FLOAT, 16);
+                        }
+                        else
+                        {
+                            ssize_t controlBits1 = 0;
+                            ssize_t controlBits2 = 0;
+                            if (imm8 == 2)
+                            {
+                                controlBits1 = 48;
+                                controlBits2 = 132;
+                            }
+                            else
+                            {
+                                controlBits1 = 32;
+                                controlBits2 = 36;
+                            }
+                            // vector.WithElement(2, value)
+                            // =>
+                            // shufps  xmm1, xmm0, 48   (xmm0 = vector, xmm1 = value)
+                            // shufps  xmm0, xmm1, 132
+                            //
+                            // vector.WithElement(3, value)
+                            // =>
+                            // shufps  xmm1, xmm0, 32   (xmm0 = vector, xmm1 = value)
+                            // shufps  xmm0, xmm1, 36
+                            GenTree* tmpOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp,
+                                                                      NI_Vector128_CreateScalarUnsafe, TYP_FLOAT, 16);
+                            GenTree* dupVectorOp = nullptr;
+                            vectorOp = impCloneExpr(vectorOp, &dupVectorOp, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                                    nullptr DEBUGARG("Clone Vector for Vector128<float>.WithElement"));
+                            valueOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, tmpOp, gtNewIconNode(controlBits1),
+                                                               NI_SSE_Shuffle, TYP_FLOAT, 16);
+                            retNode =
+                                gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp, dupVectorOp, gtNewIconNode(controlBits2),
+                                                         NI_SSE_Shuffle, TYP_FLOAT, 16);
+                        }
+                        break;
+                    }
+                    else
+                    {
+                        valueOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp, NI_Vector128_CreateScalarUnsafe,
+                                                           TYP_FLOAT, 16);
+                        immNode->AsIntCon()->SetIconValue(imm8 * 16);
+                        __fallthrough;
+                    }
+                }
+
+                case TYP_BYTE:
+                case TYP_UBYTE:
+                case TYP_INT:
+                case TYP_UINT:
+                    retNode =
+                        gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, valueOp, immNode, NI_SSE41_Insert, baseType, 16);
+                    break;
+
+                case TYP_SHORT:
+                case TYP_USHORT:
+                    retNode =
+                        gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, valueOp, immNode, NI_SSE2_Insert, baseType, 16);
+                    break;
+
+                case TYP_DOUBLE:
+                {
+                    // vector.WithElement(0, value)
+                    // =>
+                    // movsd   xmm0, xmm1  (xmm0 = vector, xmm1 = value)
+                    //
+                    // vector.WithElement(1, value)
+                    // =>
+                    // unpcklpd  xmm0, xmm1  (xmm0 = vector, xmm1 = value)
+                    valueOp =
+                        gtNewSimdHWIntrinsicNode(TYP_SIMD16, valueOp, NI_Vector128_CreateScalarUnsafe, TYP_DOUBLE, 16);
+                    NamedIntrinsic in = (imm8 == 0) ? NI_SSE2_MoveScalar : NI_SSE2_UnpackLow;
+                    retNode           = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, valueOp, in, TYP_DOUBLE, 16);
+                    break;
+                }
+
+                default:
+                    unreached();
+                    break;
+            }
+
+            if (simdSize == 32)
+            {
+                assert(clonedVectorOp);
+                int upperOrLower = (cachedImm8 >= count / 2) ? 1 : 0;
+                retNode = gtNewSimdHWIntrinsicNode(retType, clonedVectorOp, retNode, gtNewIconNode(upperOrLower),
+                                                   NI_AVX_InsertVector128, baseType, simdSize);
+            }
+
+            break;
+        }
+
+        case NI_Vector256_GetElement:
+        {
+            if (!compSupports(InstructionSet_AVX))
+            {
+                // Using software fallback if JIT/hardware don't support AVX instructions and YMM registers
+                return nullptr;
+            }
+            __fallthrough;
+        }
+
+        case NI_Vector128_GetElement:
+        {
+            assert(sig->numArgs == 2);
+            GenTree* indexOp = impStackTop().val;
+            if (!compSupports(InstructionSet_SSE2) || !varTypeIsArithmetic(baseType) || !indexOp->OperIsConst())
+            {
+                // Using software fallback if
+                // 1. JIT/hardware don't support SSE2 instructions
+                // 2. baseType is not a numeric type (throw execptions)
+                // 3. index is not a constant
+                return nullptr;
+            }
+
+            switch (baseType)
+            {
+                // Using software fallback if baseType is not supported by hardware
+                case TYP_BYTE:
+                case TYP_UBYTE:
+                case TYP_INT:
+                case TYP_UINT:
+                    if (!compSupports(InstructionSet_SSE41))
+                    {
+                        return nullptr;
+                    }
+                    break;
+
+                case TYP_LONG:
+                case TYP_ULONG:
+                    if (!compSupports(InstructionSet_SSE41_X64))
+                    {
+                        return nullptr;
+                    }
+                    break;
+
+                case TYP_DOUBLE:
+                case TYP_FLOAT:
+                case TYP_SHORT:
+                case TYP_USHORT:
+                    // short/ushort/float/double is supported by SSE2
+                    break;
+
+                default:
+                    break;
+            }
+
+            ssize_t imm8  = indexOp->AsIntCon()->IconValue();
+            ssize_t count = simdSize / genTypeSize(baseType);
+
+            if (imm8 >= count || imm8 < 0)
+            {
+                // Using software fallback if index is out of range (throw exeception)
+                return nullptr;
+            }
+
+            impPopStack();
+            GenTree*       vectorOp     = impSIMDPopStack(getSIMDTypeForSize(simdSize));
+            NamedIntrinsic resIntrinsic = NI_Illegal;
+
+            if (simdSize == 32)
+            {
+                assert(compSupports(InstructionSet_AVX));
+
+                if (imm8 >= count / 2)
+                {
+                    imm8 -= count / 2;
+                    vectorOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, gtNewIconNode(1), NI_AVX_ExtractVector128,
+                                                        baseType, simdSize);
+                }
+                else
+                {
+                    vectorOp =
+                        gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, NI_Vector256_GetLower, baseType, simdSize);
+                }
+            }
+
+            if (imm8 == 0 && (genTypeSize(baseType) >= 4))
+            {
+                switch (baseType)
+                {
+                    case TYP_LONG:
+                        resIntrinsic = NI_SSE2_X64_ConvertToInt64;
+                        break;
+
+                    case TYP_ULONG:
+                        resIntrinsic = NI_SSE2_X64_ConvertToUInt64;
+                        break;
+
+                    case TYP_INT:
+                        resIntrinsic = NI_SSE2_ConvertToInt32;
+                        break;
+
+                    case TYP_UINT:
+                        resIntrinsic = NI_SSE2_ConvertToUInt32;
+                        break;
+
+                    case TYP_FLOAT:
+                    case TYP_DOUBLE:
+                        resIntrinsic = NI_Vector128_ToScalar;
+                        break;
+
+                    default:
+                        unreached();
+                }
+
+                return gtNewSimdHWIntrinsicNode(retType, vectorOp, resIntrinsic, baseType, 16);
+            }
+
+            GenTree* immNode = gtNewIconNode(imm8);
+
+            switch (baseType)
+            {
+                case TYP_LONG:
+                case TYP_ULONG:
+                    retNode = gtNewSimdHWIntrinsicNode(retType, vectorOp, immNode, NI_SSE41_X64_Extract, baseType, 16);
+                    break;
+
+                case TYP_FLOAT:
+                {
+                    if (!compSupports(InstructionSet_SSE41))
+                    {
+                        assert(imm8 >= 1);
+                        assert(imm8 <= 3);
+                        // Emulate Vector128<float>.GetElement(i) by SSE instructions
+                        // vector.GetElement(i)
+                        // =>
+                        // shufps  xmm0, xmm0, control
+                        // (xmm0 = vector, control = i + 228)
+                        immNode->AsIntCon()->SetIconValue(228 + imm8);
+                        GenTree* clonedVectorOp = nullptr;
+                        vectorOp = impCloneExpr(vectorOp, &clonedVectorOp, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                                nullptr DEBUGARG("Clone Vector for Vector128<float>.GetElement"));
+                        vectorOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, clonedVectorOp, immNode,
+                                                            NI_SSE_Shuffle, TYP_FLOAT, 16);
+                        return gtNewSimdHWIntrinsicNode(retType, vectorOp, NI_Vector128_ToScalar, TYP_FLOAT, 16);
+                    }
+                    __fallthrough;
+                }
+
+                case TYP_UBYTE:
+                case TYP_INT:
+                case TYP_UINT:
+                    retNode = gtNewSimdHWIntrinsicNode(retType, vectorOp, immNode, NI_SSE41_Extract, baseType, 16);
+                    break;
+
+                case TYP_BYTE:
+                    // We do not have SSE41/SSE2 Extract APIs on signed small int, so need a CAST on the result
+                    retNode = gtNewSimdHWIntrinsicNode(TYP_UBYTE, vectorOp, immNode, NI_SSE41_Extract, TYP_UBYTE, 16);
+                    retNode = gtNewCastNode(TYP_INT, retNode, true, TYP_BYTE);
+                    break;
+
+                case TYP_SHORT:
+                case TYP_USHORT:
+                    // We do not have SSE41/SSE2 Extract APIs on signed small int, so need a CAST on the result
+                    retNode = gtNewSimdHWIntrinsicNode(TYP_USHORT, vectorOp, immNode, NI_SSE2_Extract, TYP_USHORT, 16);
+                    if (baseType == TYP_SHORT)
+                    {
+                        retNode = gtNewCastNode(TYP_INT, retNode, true, TYP_SHORT);
+                    }
+                    break;
+
+                case TYP_DOUBLE:
+                    assert(imm8 == 1);
+                    // vector.GetElement(1)
+                    // =>
+                    // pshufd xmm1, xmm0, 0xEE (xmm0 = vector)
+                    vectorOp = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, gtNewIconNode(0xEE), NI_SSE2_Shuffle,
+                                                        TYP_INT, 16);
+                    retNode = gtNewSimdHWIntrinsicNode(TYP_DOUBLE, vectorOp, NI_Vector128_ToScalar, TYP_DOUBLE, 16);
+                    break;
+
+                default:
+                    unreached();
+            }
+
+            break;
+        }
+
+        default:
+        {
+            unreached();
+            break;
+        }
+    }
+
+    return retNode;
 }
 
 GenTree* Compiler::impSSEIntrinsic(NamedIntrinsic        intrinsic,
@@ -958,14 +1650,6 @@ GenTree* Compiler::impSSEIntrinsic(NamedIntrinsic        intrinsic,
 
     switch (intrinsic)
     {
-        case NI_SSE_MoveMask:
-            assert(sig->numArgs == 1);
-            assert(JITtype2varType(sig->retType) == TYP_INT);
-            assert(getBaseTypeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args)) == TYP_FLOAT);
-            op1     = impSIMDPopStack(TYP_SIMD16);
-            retNode = gtNewSimdHWIntrinsicNode(TYP_INT, op1, intrinsic, TYP_FLOAT, simdSize);
-            break;
-
         case NI_SSE_Prefetch0:
         case NI_SSE_Prefetch1:
         case NI_SSE_Prefetch2:
@@ -975,18 +1659,6 @@ GenTree* Compiler::impSSEIntrinsic(NamedIntrinsic        intrinsic,
             assert(JITtype2varType(sig->retType) == TYP_VOID);
             op1     = impPopStack().val;
             retNode = gtNewSimdHWIntrinsicNode(TYP_VOID, op1, intrinsic, TYP_UBYTE, 0);
-            break;
-        }
-
-        case NI_SSE_StaticCast:
-        {
-            // We fold away the static cast here, as it only exists to satisfy
-            // the type system. It is safe to do this here since the retNode type
-            // and the signature return type are both TYP_SIMD16.
-            assert(sig->numArgs == 1);
-            retNode = impSIMDPopStack(TYP_SIMD16, false, sig->retTypeClass);
-            SetOpLclRelatedToSIMDIntrinsic(retNode);
-            assert(retNode->gtType == getSIMDTypeForSize(getSIMDTypeSizeInBytes(sig->retTypeSigClass)));
             break;
         }
 
@@ -1053,17 +1725,6 @@ GenTree* Compiler::impSSE2Intrinsic(NamedIntrinsic        intrinsic,
             break;
         }
 
-        case NI_SSE2_MoveMask:
-        {
-            assert(sig->numArgs == 1);
-            retType = JITtype2varType(sig->retType);
-            assert(retType == TYP_INT);
-            op1      = impSIMDPopStack(TYP_SIMD16);
-            baseType = getBaseTypeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args));
-            retNode  = gtNewSimdHWIntrinsicNode(retType, op1, intrinsic, baseType, simdSize);
-            break;
-        }
-
         case NI_SSE2_StoreNonTemporal:
         {
             assert(sig->numArgs == 2);
@@ -1094,16 +1755,18 @@ GenTree* Compiler::impSSE42Intrinsic(NamedIntrinsic        intrinsic,
     CORINFO_ARG_LIST_HANDLE argList = sig->args;
     CORINFO_CLASS_HANDLE    argClass;
     CorInfoType             corType;
+
     switch (intrinsic)
     {
         case NI_SSE42_Crc32:
+        case NI_SSE42_X64_Crc32:
             assert(sig->numArgs == 2);
             op2     = impPopStack().val;
             op1     = impPopStack().val;
             argList = info.compCompHnd->getArgNext(argList);                        // the second argument
             corType = strip(info.compCompHnd->getArgType(sig, argList, &argClass)); // type of the second argument
 
-            retNode = gtNewScalarHWIntrinsicNode(callType, op1, op2, NI_SSE42_Crc32);
+            retNode = gtNewScalarHWIntrinsicNode(callType, op1, op2, intrinsic);
 
             // TODO - currently we use the BaseType to bring the type of the second argument
             // to the code generator. May encode the overload info in other way.
@@ -1115,26 +1778,6 @@ GenTree* Compiler::impSSE42Intrinsic(NamedIntrinsic        intrinsic,
             break;
     }
     return retNode;
-}
-
-//------------------------------------------------------------------------
-// normalizeAndGetHalfIndex: compute the half index of a Vector256<baseType>
-//                           and normalize the index to the specific range
-//
-// Arguments:
-//    indexPtr   -- OUT paramter, the pointer to the original index value
-//    baseType   -- the base type of the Vector256<T>
-//
-// Return Value:
-//    retuen the middle index of a Vector256<baseType>
-//    return the normalized index via indexPtr
-//
-static int normalizeAndGetHalfIndex(int* indexPtr, var_types baseType)
-{
-    assert(varTypeIsArithmetic(baseType));
-    // clear the unused bits to normalize the index into the range of [0, length of Vector256<baseType>)
-    *indexPtr = (*indexPtr) & (32 / genTypeSize(baseType) - 1);
-    return (16 / genTypeSize(baseType));
 }
 
 GenTree* Compiler::impAvxOrAvx2Intrinsic(NamedIntrinsic        intrinsic,
@@ -1150,204 +1793,6 @@ GenTree* Compiler::impAvxOrAvx2Intrinsic(NamedIntrinsic        intrinsic,
 
     switch (intrinsic)
     {
-        case NI_AVX_Extract:
-        {
-            // Avx.Extract executes software implementation when the imm8 argument is not compile-time constant
-            assert(!mustExpand);
-
-            GenTree* lastOp   = impPopStack().val;
-            GenTree* vectorOp = impSIMDPopStack(TYP_SIMD32);
-            assert(lastOp->IsCnsIntOrI());
-            int ival          = (int)lastOp->AsIntCon()->IconValue();
-            baseType          = getBaseTypeOfSIMDType(info.compCompHnd->getArgClass(sig, sig->args));
-            var_types retType = JITtype2varType(sig->retType);
-            assert(varTypeIsArithmetic(baseType));
-
-            int            midIndex         = normalizeAndGetHalfIndex(&ival, baseType);
-            NamedIntrinsic extractIntrinsic = varTypeIsShort(baseType) ? NI_SSE2_Extract : NI_SSE41_Extract;
-            GenTree*       half             = nullptr;
-
-            if (ival >= midIndex)
-            {
-                half = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, gtNewIconNode(1), NI_AVX_ExtractVector128,
-                                                baseType, 32);
-                ival -= midIndex;
-            }
-            else
-            {
-                half = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, NI_AVX_GetLowerHalf, baseType, 32);
-            }
-
-            retNode = gtNewSimdHWIntrinsicNode(retType, half, gtNewIconNode(ival), extractIntrinsic, baseType, 16);
-            break;
-        }
-
-        case NI_AVX_Insert:
-        {
-            // Avx.Extract executes software implementation when the imm8 argument is not compile-time constant
-            assert(!mustExpand);
-
-            GenTree* lastOp   = impPopStack().val;
-            GenTree* dataOp   = impPopStack().val;
-            GenTree* vectorOp = impSIMDPopStack(TYP_SIMD32);
-            assert(lastOp->IsCnsIntOrI());
-            int ival = (int)lastOp->AsIntCon()->IconValue();
-            baseType = getBaseTypeOfSIMDType(sig->retTypeSigClass);
-            assert(varTypeIsArithmetic(baseType));
-
-            int            midIndex        = normalizeAndGetHalfIndex(&ival, baseType);
-            NamedIntrinsic insertIntrinsic = varTypeIsShort(baseType) ? NI_SSE2_Insert : NI_SSE41_Insert;
-
-            GenTree* clonedVectorOp;
-            vectorOp =
-                impCloneExpr(vectorOp, &clonedVectorOp, info.compCompHnd->getArgClass(sig, sig->args),
-                             (unsigned)CHECK_SPILL_ALL, nullptr DEBUGARG("AVX Insert clones the vector operand"));
-
-            if (ival >= midIndex)
-            {
-                GenTree* halfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, gtNewIconNode(1),
-                                                               NI_AVX_ExtractVector128, baseType, 32);
-                GenTree* ModifiedHalfVector =
-                    gtNewSimdHWIntrinsicNode(TYP_SIMD16, halfVector, dataOp, gtNewIconNode(ival - midIndex),
-                                             insertIntrinsic, baseType, 16);
-                retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD32, clonedVectorOp, ModifiedHalfVector, gtNewIconNode(1),
-                                                   NI_AVX_InsertVector128, baseType, 32);
-            }
-            else
-            {
-                GenTree* halfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, NI_AVX_GetLowerHalf, baseType, 32);
-                GenTree* ModifiedHalfVector =
-                    gtNewSimdHWIntrinsicNode(TYP_SIMD32, halfVector, dataOp, gtNewIconNode(ival), insertIntrinsic,
-                                             baseType, 16);
-                retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD32, clonedVectorOp, ModifiedHalfVector, gtNewIconNode(15),
-                                                   NI_AVX_Blend, TYP_FLOAT, 32);
-            }
-            break;
-        }
-
-        case NI_AVX_SetVector256:
-        {
-            // TODO-XARCH: support long/ulong on 32-bit platfroms (remove HW_Flag_SecondArgMaybe64Bit)
-            int numArgs = sig->numArgs;
-            assert(numArgs >= 4);
-            assert(numArgs <= 32);
-            baseType                  = getBaseTypeOfSIMDType(sig->retTypeSigClass);
-            GenTree* higherHalfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, NI_SSE_SetZeroVector128, TYP_FLOAT, 16);
-            GenTree* lowerHalfVector  = gtNewSimdHWIntrinsicNode(TYP_SIMD16, NI_SSE_SetZeroVector128, TYP_FLOAT, 16);
-            NamedIntrinsic insertIntrinsic = varTypeIsShort(baseType) ? NI_SSE2_Insert : NI_SSE41_Insert;
-            int            ival            = 0;
-
-            if (baseType != TYP_DOUBLE)
-            {
-                assert(varTypeIsIntegral(baseType) || baseType == TYP_FLOAT);
-
-                for (int i = 0; i < numArgs / 2; i++)
-                {
-                    GenTree* arg = impPopStack().val;
-                    // SSE4.1 insertps has different semantics from integral insert
-                    ival            = baseType == TYP_FLOAT ? i * 16 : i;
-                    lowerHalfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, lowerHalfVector, arg, gtNewIconNode(ival),
-                                                               insertIntrinsic, baseType, 16);
-                }
-
-                for (int i = 0; i < numArgs / 2; i++)
-                {
-                    GenTree* arg = impPopStack().val;
-                    // SSE4.1 insertps has different semantics from integral insert
-                    ival             = baseType == TYP_FLOAT ? i * 16 : i;
-                    higherHalfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, higherHalfVector, arg, gtNewIconNode(ival),
-                                                                insertIntrinsic, baseType, 16);
-                }
-            }
-            else
-            {
-                GenTree* op4     = impPopStack().val;
-                GenTree* op3     = impPopStack().val;
-                GenTree* op2     = impPopStack().val;
-                GenTree* op1     = impPopStack().val;
-                lowerHalfVector  = gtNewSimdHWIntrinsicNode(TYP_SIMD16, op4, op3, NI_SSE2_UnpackLow, TYP_DOUBLE, 16);
-                higherHalfVector = gtNewSimdHWIntrinsicNode(TYP_SIMD16, op2, op1, NI_SSE2_UnpackLow, TYP_DOUBLE, 16);
-            }
-
-            retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD32, lowerHalfVector, higherHalfVector, gtNewIconNode(1),
-                                               NI_AVX_InsertVector128, baseType, 32);
-            break;
-        }
-
-        case NI_AVX_SetAllVector256:
-        {
-            baseType = getBaseTypeOfSIMDType(sig->retTypeSigClass);
-            if (!varTypeIsArithmetic(baseType))
-            {
-                retNode = impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_TYPE_NOT_SUPPORTED, method, sig, mustExpand);
-            }
-#ifdef _TARGET_X86_
-            // TODO-XARCH: support long/ulong on 32-bit platfroms
-            else if (varTypeIsLong(baseType))
-            {
-                return impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_PLATFORM_NOT_SUPPORTED, method, sig, mustExpand);
-            }
-#endif
-            else
-            {
-                GenTree* arg = impPopStack().val;
-                retNode      = gtNewSimdHWIntrinsicNode(TYP_SIMD32, arg, NI_AVX_SetAllVector256, baseType, 32);
-            }
-            break;
-        }
-
-        case NI_AVX_SetHighLow:
-        {
-            baseType              = getBaseTypeOfSIMDType(sig->retTypeSigClass);
-            GenTree* lowerVector  = impSIMDPopStack(TYP_SIMD16);
-            GenTree* higherVector = impSIMDPopStack(TYP_SIMD16);
-            retNode               = gtNewSimdHWIntrinsicNode(TYP_SIMD32, lowerVector, higherVector, gtNewIconNode(1),
-                                               NI_AVX_InsertVector128, baseType, 32);
-            break;
-        }
-
-        case NI_AVX_StaticCast:
-        {
-            // We fold away the static cast here, as it only exists to satisfy
-            // the type system. It is safe to do this here since the retNode type
-            // and the signature return type are both TYP_SIMD32.
-            assert(sig->numArgs == 1);
-            retNode = impSIMDPopStack(TYP_SIMD32, false, sig->retTypeClass);
-            SetOpLclRelatedToSIMDIntrinsic(retNode);
-            assert(retNode->gtType == getSIMDTypeForSize(getSIMDTypeSizeInBytes(sig->retTypeSigClass)));
-            break;
-        }
-
-        case NI_AVX_ExtractVector128:
-        case NI_AVX2_ExtractVector128:
-        {
-            GenTree* lastOp = impPopStack().val;
-            assert(lastOp->IsCnsIntOrI() || mustExpand);
-            GenTree* vectorOp = impSIMDPopStack(TYP_SIMD32);
-            if (sig->numArgs == 2)
-            {
-                baseType = getBaseTypeOfSIMDType(sig->retTypeSigClass);
-                if (!varTypeIsArithmetic(baseType))
-                {
-                    retNode = impUnsupportedHWIntrinsic(CORINFO_HELP_THROW_TYPE_NOT_SUPPORTED, method, sig, mustExpand);
-                }
-                else
-                {
-                    retNode = gtNewSimdHWIntrinsicNode(TYP_SIMD16, vectorOp, lastOp, intrinsic, baseType, 32);
-                }
-            }
-            else
-            {
-                assert(sig->numArgs == 3);
-                op1                                    = impPopStack().val;
-                CORINFO_ARG_LIST_HANDLE secondArg      = info.compCompHnd->getArgNext(sig->args);
-                CORINFO_CLASS_HANDLE    secondArgClass = info.compCompHnd->getArgClass(sig, secondArg);
-                baseType                               = getBaseTypeOfSIMDType(secondArgClass);
-                retNode = gtNewSimdHWIntrinsicNode(TYP_VOID, op1, vectorOp, lastOp, intrinsic, baseType, 32);
-            }
-            break;
-        }
-
         case NI_AVX2_PermuteVar8x32:
         {
             baseType = getBaseTypeOfSIMDType(sig->retTypeSigClass);
@@ -1417,16 +1862,21 @@ GenTree* Compiler::impAESIntrinsic(NamedIntrinsic        intrinsic,
     return nullptr;
 }
 
-GenTree* Compiler::impBMI1Intrinsic(NamedIntrinsic        intrinsic,
-                                    CORINFO_METHOD_HANDLE method,
-                                    CORINFO_SIG_INFO*     sig,
-                                    bool                  mustExpand)
+GenTree* Compiler::impBMI1OrBMI2Intrinsic(NamedIntrinsic        intrinsic,
+                                          CORINFO_METHOD_HANDLE method,
+                                          CORINFO_SIG_INFO*     sig,
+                                          bool                  mustExpand)
 {
     var_types callType = JITtype2varType(sig->retType);
 
     switch (intrinsic)
     {
         case NI_BMI1_AndNot:
+        case NI_BMI1_X64_AndNot:
+        case NI_BMI2_ParallelBitDeposit:
+        case NI_BMI2_ParallelBitExtract:
+        case NI_BMI2_X64_ParallelBitDeposit:
+        case NI_BMI2_X64_ParallelBitExtract:
         {
             assert(sig->numArgs == 2);
 
@@ -1434,51 +1884,76 @@ GenTree* Compiler::impBMI1Intrinsic(NamedIntrinsic        intrinsic,
             GenTree* op1 = impPopStack().val;
 
             return gtNewScalarHWIntrinsicNode(callType, op1, op2, intrinsic);
+        }
+
+        case NI_BMI2_ZeroHighBits:
+        case NI_BMI2_X64_ZeroHighBits:
+        {
+            assert(sig->numArgs == 2);
+
+            GenTree* op2 = impPopStack().val;
+            GenTree* op1 = impPopStack().val;
+            // Instruction BZHI requires to encode op2 (3rd register) in VEX.vvvv and op1 maybe memory operand,
+            // so swap op1 and op2 to unify the backend code.
+            return gtNewScalarHWIntrinsicNode(callType, op2, op1, intrinsic);
         }
 
         case NI_BMI1_ExtractLowestSetBit:
         case NI_BMI1_GetMaskUpToLowestSetBit:
         case NI_BMI1_ResetLowestSetBit:
         case NI_BMI1_TrailingZeroCount:
+        case NI_BMI1_X64_ExtractLowestSetBit:
+        case NI_BMI1_X64_GetMaskUpToLowestSetBit:
+        case NI_BMI1_X64_ResetLowestSetBit:
+        case NI_BMI1_X64_TrailingZeroCount:
         {
             assert(sig->numArgs == 1);
             GenTree* op1 = impPopStack().val;
             return gtNewScalarHWIntrinsicNode(callType, op1, intrinsic);
         }
 
-        default:
+        case NI_BMI1_BitFieldExtract:
+        case NI_BMI1_X64_BitFieldExtract:
         {
-            unreached();
-            return nullptr;
-        }
-    }
-}
-
-GenTree* Compiler::impBMI2Intrinsic(NamedIntrinsic        intrinsic,
-                                    CORINFO_METHOD_HANDLE method,
-                                    CORINFO_SIG_INFO*     sig,
-                                    bool                  mustExpand)
-{
-    var_types callType = JITtype2varType(sig->retType);
-
-    switch (intrinsic)
-    {
-        case NI_BMI2_ParallelBitDeposit:
-        case NI_BMI2_ParallelBitExtract:
-        {
+            // The 3-arg version is implemented in managed code
+            if (sig->numArgs == 3)
+            {
+                return nullptr;
+            }
             assert(sig->numArgs == 2);
 
             GenTree* op2 = impPopStack().val;
             GenTree* op1 = impPopStack().val;
+            // Instruction BEXTR requires to encode op2 (3rd register) in VEX.vvvv and op1 maybe memory operand,
+            // so swap op1 and op2 to unify the backend code.
+            return gtNewScalarHWIntrinsicNode(callType, op2, op1, intrinsic);
+        }
 
-            return gtNewScalarHWIntrinsicNode(callType, op1, op2, intrinsic);
+        case NI_BMI2_MultiplyNoFlags:
+        case NI_BMI2_X64_MultiplyNoFlags:
+        {
+            assert(sig->numArgs == 2 || sig->numArgs == 3);
+            GenTree* op3 = nullptr;
+            if (sig->numArgs == 3)
+            {
+                op3 = impPopStack().val;
+            }
+
+            GenTree* op2 = impPopStack().val;
+            GenTree* op1 = impPopStack().val;
+
+            if (sig->numArgs == 3)
+            {
+                return gtNewScalarHWIntrinsicNode(callType, op1, op2, op3, intrinsic);
+            }
+            else
+            {
+                return gtNewScalarHWIntrinsicNode(callType, op1, op2, intrinsic);
+            }
         }
 
         default:
-        {
             unreached();
-            return nullptr;
-        }
     }
 }
 
@@ -1497,7 +1972,7 @@ GenTree* Compiler::impLZCNTIntrinsic(NamedIntrinsic        intrinsic,
 {
     assert(sig->numArgs == 1);
     var_types callType = JITtype2varType(sig->retType);
-    return gtNewScalarHWIntrinsicNode(callType, impPopStack().val, NI_LZCNT_LeadingZeroCount);
+    return gtNewScalarHWIntrinsicNode(callType, impPopStack().val, intrinsic);
 }
 
 GenTree* Compiler::impPCLMULQDQIntrinsic(NamedIntrinsic        intrinsic,
@@ -1515,7 +1990,7 @@ GenTree* Compiler::impPOPCNTIntrinsic(NamedIntrinsic        intrinsic,
 {
     assert(sig->numArgs == 1);
     var_types callType = JITtype2varType(sig->retType);
-    return gtNewScalarHWIntrinsicNode(callType, impPopStack().val, NI_POPCNT_PopCount);
+    return gtNewScalarHWIntrinsicNode(callType, impPopStack().val, intrinsic);
 }
 
 #endif // FEATURE_HW_INTRINSICS

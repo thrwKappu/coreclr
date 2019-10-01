@@ -31,6 +31,45 @@ struct DebuggerControllerPatch;
 class DebuggerUserBreakpoint;
 class ControllerStackInfo;
 
+typedef struct _DR6 *PDR6;
+typedef struct _DR6 {
+    DWORD       B0 : 1;
+    DWORD       B1 : 1;
+    DWORD       B2 : 1;
+    DWORD       B3 : 1;
+    DWORD       Pad1 : 9;
+    DWORD       BD : 1;
+    DWORD       BS : 1;
+    DWORD       BT : 1;
+} DR6;
+
+typedef struct _DR7 *PDR7;
+typedef struct _DR7 {
+    DWORD       L0 : 1;
+    DWORD       G0 : 1;
+    DWORD       L1 : 1;
+    DWORD       G1 : 1;
+    DWORD       L2 : 1;
+    DWORD       G2 : 1;
+    DWORD       L3 : 1;
+    DWORD       G3 : 1;
+    DWORD       LE : 1;
+    DWORD       GE : 1;
+    DWORD       Pad1 : 3;
+    DWORD       GD : 1;
+    DWORD       Pad2 : 1;
+    DWORD       Pad3 : 1;
+    DWORD       Rwe0 : 2;
+    DWORD       Len0 : 2;
+    DWORD       Rwe1 : 2;
+    DWORD       Len1 : 2;
+    DWORD       Rwe2 : 2;
+    DWORD       Len2 : 2;
+    DWORD       Rwe3 : 2;
+    DWORD       Len3 : 2;
+} DR7;
+
+
 // Ticket for ensuring that it's safe to get a stack trace.
 class StackTraceTicket
 {
@@ -387,7 +426,7 @@ private:
         DebuggerJitInfo        *dji; // used for Slave and native patches, though only when tracking JIT Info
     };
 
-#ifndef _TARGET_ARM_
+#ifndef FEATURE_EMULATE_SINGLESTEP
     // this is shared among all the skippers for this controller. see the comments
     // right before the definition of SharedPatchBypassBuffer for lifetime info.
     SharedPatchBypassBuffer* m_pSharedPatchBypassBuffer;
@@ -491,7 +530,7 @@ public:
     // Is this patch at a position at which it's safe to take a stack?
     bool IsSafeForStackTrace();
 
-#ifndef _TARGET_ARM_
+#ifndef FEATURE_EMULATE_SINGLESTEP
     // gets a pointer to the shared buffer
     SharedPatchBypassBuffer* GetOrCreateSharedPatchBypassBuffer();
 
@@ -864,6 +903,7 @@ enum DEBUGGER_CONTROLLER_TYPE
                                           // send that they've hit a user breakpoint to the Right Side.
     DEBUGGER_CONTROLLER_JMC_STEPPER,      // Stepper that only stops in JMC-functions.
     DEBUGGER_CONTROLLER_CONTINUABLE_EXCEPTION,
+    DEBUGGER_CONTROLLER_DATA_BREAKPOINT,
     DEBUGGER_CONTROLLER_STATIC,
 };
 
@@ -921,7 +961,7 @@ inline bool IsInUsedAction(DPOSS_ACTION action)
 inline void VerifyExecutableAddress(const BYTE* address)
 {
 // TODO: : when can we apply this to x86?
-#if defined(_WIN64)   
+#if defined(BIT64)   
 #if defined(_DEBUG) 
 #ifndef FEATURE_PAL    
     MEMORY_BASIC_INFORMATION mbi;
@@ -943,7 +983,7 @@ inline void VerifyExecutableAddress(const BYTE* address)
     }
 #endif // !FEATURE_PAL    
 #endif // _DEBUG   
-#endif // _WIN64
+#endif // BIT64
 }
 
 #endif // !DACCESS_COMPILE
@@ -1346,7 +1386,7 @@ public:
     // the bp. So we pass in an extra flag, fInteruptedBySetIp,  to let the controller decide how to handle this.
     // Since SetIP only works within a single function, this can only be an issue if a thread's current stopping
     // location and the patch it set are in the same function. (So this could happen for step-over, but never
-    // setp-out). 
+    // step-out). 
     // This flag will almost always be false.
     // 
     // Once we actually send the event, we're under the debugger lock, and so the world is stable underneath us.
@@ -1416,7 +1456,7 @@ class DebuggerPatchSkip : public DebuggerController
     CORDB_ADDRESS_TYPE      *m_address;
     int                      m_iOrigDisp;        // the original displacement of a relative call or jump
     InstructionAttribute     m_instrAttrib;      // info about the instruction being skipped over
-#ifndef _TARGET_ARM_
+#ifndef FEATURE_EMULATE_SINGLESTEP
     // this is shared among all the skippers and the controller. see the comments
     // right before the definition of SharedPatchBypassBuffer for lifetime info.
     SharedPatchBypassBuffer *m_pSharedPatchBypassBuffer;
@@ -1633,11 +1673,11 @@ protected:
     // This is the only frame that the ranges are valid in.    
     FramePointer            m_fp;
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
     // This frame pointer is used for funclet stepping.
     // See IsRangeAppropriate() for more information.
     FramePointer            m_fpParentMethod;
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
     
     //m_fpException is 0 if we haven't stepped into an exception, 
     //  and is ignored.  If we get a TriggerUnwind while mid-step, we note
@@ -1731,6 +1771,52 @@ private:
     bool SendEvent(Thread *thread, bool fInteruptedBySetIp);
 };
 
+#ifdef FEATURE_DATABREAKPOINT
+
+class DebuggerDataBreakpoint : public DebuggerController
+{
+private:
+    CONTEXT m_context;
+public:
+    DebuggerDataBreakpoint(Thread* pThread) : DebuggerController(pThread, NULL)
+    {
+        LOG((LF_CORDB, LL_INFO10000, "D:DDBP: Data Breakpoint event created\n"));
+        memcpy(&m_context, g_pEEInterface->GetThreadFilterContext(pThread), sizeof(CONTEXT));
+    }
+    
+    virtual DEBUGGER_CONTROLLER_TYPE GetDCType(void)
+    {
+        return DEBUGGER_CONTROLLER_DATA_BREAKPOINT;
+    }
+
+    virtual TP_RESULT TriggerPatch(DebuggerControllerPatch *patch, Thread *thread,  TRIGGER_WHY tyWhy);
+
+    virtual bool TriggerSingleStep(Thread *thread, const BYTE *ip);
+
+    bool SendEvent(Thread *thread, bool fInteruptedBySetIp)
+    {
+        CONTRACTL
+        {
+            NOTHROW;
+            SENDEVENT_CONTRACT_ITEMS;
+        }
+        CONTRACTL_END;
+
+        LOG((LF_CORDB, LL_INFO10000, "DDBP::SE: in DebuggerDataBreakpoint's SendEvent\n"));
+
+        g_pDebugger->SendDataBreakpoint(thread, &m_context, this);
+
+        Delete();
+
+        return true;
+    }
+
+    static bool TriggerDataBreakpoint(Thread *thread, CONTEXT * pContext);
+};
+
+#endif // FEATURE_DATABREAKPOINT
+
+
 /* ------------------------------------------------------------------------- *
  * DebuggerUserBreakpoint routines.  UserBreakpoints are used 
  * by Runtime threads to send that they've hit a user breakpoint to the 
@@ -1800,6 +1886,7 @@ private:
 
     bool SendEvent(Thread *thread, bool fInteruptedBySetIp);
 };
+
 
 #ifdef EnC_SUPPORTED
 //---------------------------------------------------------------------------------------

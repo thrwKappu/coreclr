@@ -19,7 +19,7 @@
 #include "field.h"
 #include "ecall.h"
 
-#ifdef _WIN64
+#ifdef BIT64
 
 // These are the fastest(?) versions of JIT helpers as they have the code to GetThread patched into them
 // that does not make a call.
@@ -47,7 +47,7 @@ EXTERN_C Object* JIT_NewArr1VC_UP (CORINFO_CLASS_HANDLE arrayMT, INT_PTR size);
 extern WriteBarrierManager g_WriteBarrierManager;
 #endif // _TARGET_AMD64_
 
-#endif // _WIN64
+#endif // BIT64
 
 /*********************************************************************/ 
 // Initialize the part of the JIT helpers that require very little of
@@ -80,6 +80,9 @@ void InitJITHelpers1()
         SetJitHelperFunction(CORINFO_HELP_NEWARR_1_OBJ, JIT_NewArr1OBJ_MP_FastPortable);
 
         ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateString_MP_FastPortable), ECall::FastAllocateString);
+#ifdef FEATURE_UTF8STRING
+        ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateUtf8String_MP_FastPortable), ECall::FastAllocateUtf8String);
+#endif // FEATURE_UTF8STRING
 #else // FEATURE_PAL
         // if (multi-proc || server GC)
         if (GCHeapUtilities::UseThreadAllocationContexts())
@@ -91,6 +94,9 @@ void InitJITHelpers1()
             SetJitHelperFunction(CORINFO_HELP_NEWARR_1_OBJ, JIT_NewArr1OBJ_MP_InlineGetThread);
 
             ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateStringFastMP_InlineGetThread), ECall::FastAllocateString);
+#ifdef FEATURE_UTF8STRING
+            ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateUtf8String_MP_FastPortable), ECall::FastAllocateUtf8String);
+#endif // FEATURE_UTF8STRING
         }
         else
         {
@@ -105,6 +111,9 @@ void InitJITHelpers1()
             SetJitHelperFunction(CORINFO_HELP_NEWARR_1_OBJ, JIT_NewArr1OBJ_UP);
 
             ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateStringFastUP), ECall::FastAllocateString);
+#ifdef FEATURE_UTF8STRING
+            ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateUtf8String_MP_FastPortable), ECall::FastAllocateUtf8String);
+#endif // FEATURE_UTF8STRING
         }
 #endif // FEATURE_PAL
     }

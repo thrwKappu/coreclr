@@ -5,6 +5,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
+#pragma warning disable SA1121 // explicitly using type aliases instead of built-in types
 #if BIT64
 using nuint = System.UInt64;
 #else
@@ -35,6 +36,6 @@ namespace System.Runtime
         private static extern unsafe void RhZeroMemory(void* b, nuint byteLength);
 
         [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern unsafe void RhBulkMoveWithWriteBarrier(ref byte destination, ref byte source, nuint byteCount);
+        internal static extern void RhBulkMoveWithWriteBarrier(ref byte destination, ref byte source, nuint byteCount);
     }
 }

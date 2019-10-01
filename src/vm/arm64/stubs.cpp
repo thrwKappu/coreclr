@@ -1070,12 +1070,6 @@ void emitCOMStubCall (ComCallMethodDesc *pCOMMethod, PCODE target)
 }
 #endif // FEATURE_COMINTEROP
 
-
-void STDMETHODCALLTYPE JIT_ProfilerEnterLeaveTailcallStub(UINT_PTR ProfilerHandle)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-
 void JIT_TailCall() 
 {
     _ASSERTE(!"ARM64:NYI");
@@ -1084,7 +1078,6 @@ void JIT_TailCall()
 #if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 void InitJITHelpers1()
 {
-#ifdef FEATURE_PAL // TODO
     STANDARD_VM_CONTRACT;
 
     _ASSERTE(g_SystemInfo.dwNumberOfProcessors != 0);
@@ -1107,30 +1100,13 @@ void InitJITHelpers1()
             ECall::DynamicallyAssignFCallImpl(GetEEFuncEntryPoint(AllocateString_MP_FastPortable), ECall::FastAllocateString);
         }
     }
-#endif
 
     JIT_UpdateWriteBarrierState(GCHeapUtilities::IsServerHeap());
 }
-#ifndef FEATURE_PAL // TODO-ARM64-WINDOWS #13592
-EXTERN_C void JIT_UpdateWriteBarrierState(bool) {}
-#endif
 
 #else
 EXTERN_C void JIT_UpdateWriteBarrierState(bool) {}
 #endif // !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
-
-EXTERN_C void __stdcall ProfileEnterNaked(UINT_PTR clientData)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-EXTERN_C void __stdcall ProfileLeaveNaked(UINT_PTR clientData)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-EXTERN_C void __stdcall ProfileTailcallNaked(UINT_PTR clientData)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
 
 PTR_CONTEXT GetCONTEXTFromRedirectedStubStackFrame(T_DISPATCHER_CONTEXT * pDispatcherContext)
 {
@@ -1219,14 +1195,6 @@ AdjustContextForVirtualStub(
 }
 #endif // !(DACCESS_COMPILE && CROSSGEN_COMPILE)
 
-#ifdef FEATURE_COMINTEROP
-extern "C" void GenericComPlusCallStub(void)
-{
-    // This is not required for coreclr scenarios
-    throw "GenericComPlusCallStub is not implemented yet.";    
-}
-#endif // FEATURE_COMINTEROP
-
 UMEntryThunk * UMEntryThunk::Decode(void *pCallback)
 {
     _ASSERTE(offsetof(UMEntryThunkCode, m_code) == 0);
@@ -1280,56 +1248,6 @@ void UMEntryThunkCode::Poison()
 }
 
 #endif // DACCESS_COMPILE
-
-#ifdef PROFILING_SUPPORTED
-#include "proftoeeinterfaceimpl.h"
-
-extern UINT_PTR ProfileGetIPFromPlatformSpecificHandle(void * handle)
-{
-    _ASSERTE(!"ARM64:NYI");
-    return NULL;
-}
-
-extern void ProfileSetFunctionIDInPlatformSpecificHandle(void * pPlatformSpecificHandle, FunctionID functionID)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-
-ProfileArgIterator::ProfileArgIterator(MetaSig * pMetaSig, void* platformSpecificHandle)
-    : m_argIterator(pMetaSig)
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-
-ProfileArgIterator::~ProfileArgIterator()
-{
-    _ASSERTE(!"ARM64:NYI");
-}
-
-LPVOID ProfileArgIterator::GetNextArgAddr()
-{
-    _ASSERTE(!"ARM64:NYI");
-    return NULL;
-}
-
-LPVOID ProfileArgIterator::GetHiddenArgValue(void)
-{
-    _ASSERTE(!"ARM64:NYI");
-    return NULL;
-}
-
-LPVOID ProfileArgIterator::GetThis(void)
-{
-    _ASSERTE(!"ARM64:NYI");
-    return NULL;
-}
-
-LPVOID ProfileArgIterator::GetReturnBufferAddr(void)
-{
-    _ASSERTE(!"ARM64:NYI");
-    return NULL;
-}
-#endif
 
 #if !defined(DACCESS_COMPILE)
 VOID ResetCurrentContext()

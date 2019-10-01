@@ -79,7 +79,6 @@ inline PTR_EEClass MethodTable::GetClass()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    _ASSERTE_IMPL(!IsAsyncPinType());
     _ASSERTE_IMPL(GetClass_NoLogging() != NULL);
 
     g_IBCLogger.LogEEClassAndMethodTableAccess(this);
@@ -323,13 +322,6 @@ inline DWORD MethodTable::GetAttrClass()
 }
 
 //==========================================================================================
-inline BOOL MethodTable::IsSerializable()
-{
-    WRAPPER_NO_CONTRACT;
-    return GetClass()->IsSerializable();
-}
-
-//==========================================================================================
 inline BOOL MethodTable::SupportsGenericInterop(TypeHandle::InteropKind interopKind,
                         MethodTable::Mode mode /*= modeAll*/)
 {
@@ -361,24 +353,6 @@ inline BOOL MethodTable::HasFieldsWhichMustBeInited()
 {
     WRAPPER_NO_CONTRACT;
     return GetClass()->HasFieldsWhichMustBeInited();
-}
-
-//==========================================================================================
-inline BOOL MethodTable::SupportsAutoNGen()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-//==========================================================================================
-inline BOOL MethodTable::RunCCTorAsIfNGenImageExists()
-{
-    LIMITED_METHOD_CONTRACT;
-#ifdef FEATURE_CORESYSTEM
-    return TRUE; // On our coresystem builds we will always be using triton in the customer scenario.
-#else
-    return FALSE;
-#endif
 }
 
 //==========================================================================================
@@ -482,28 +456,7 @@ inline BOOL MethodTable::GetGuidForWinRT(GUID *pGuid)
     return bRes;
 }
 
-
 #endif // FEATURE_COMINTEROP
-
-//==========================================================================================
-// The following two methods produce correct results only if this type is
-// marked Serializable (verified by assert in checked builds) and the field
-// in question was introduced in this type (the index is the FieldDesc
-// index).
-inline BOOL MethodTable::IsFieldNotSerialized(DWORD dwFieldIndex)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(IsSerializable());
-    return FALSE;
-}
-
-//==========================================================================================
-inline BOOL MethodTable::IsFieldOptionallySerialized(DWORD dwFieldIndex)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(IsSerializable());
-    return FALSE;
-}
 
 //==========================================================================================
 // Is pParentMT System.Enum? (Cannot be called before System.Enum is loaded.)
@@ -645,7 +598,6 @@ inline MethodDesc* MethodTable::GetMethodDescForSlot(DWORD slot)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -663,6 +615,17 @@ inline MethodDesc* MethodTable::GetMethodDescForSlot(DWORD slot)
 }
 
 #ifndef DACCESS_COMPILE 
+
+//==========================================================================================
+inline void MethodTable::CopySlotFrom(UINT32 slotNumber, MethodDataWrapper &hSourceMTData, MethodTable *pSourceMT)
+{
+    WRAPPER_NO_CONTRACT;
+
+    MethodDesc *pMD = hSourceMTData->GetImplMethodDesc(slotNumber);
+    _ASSERTE(CheckPointer(pMD));
+    _ASSERTE(pMD == pSourceMT->GetMethodDescForSlot(slotNumber));
+    SetSlot(slotNumber, pMD->GetInitialEntryPointForCopiedSlot());
+}
 
 //==========================================================================================
 inline INT32 MethodTable::MethodIterator::GetNumMethods() const
@@ -1231,6 +1194,15 @@ inline IMDInternalImport* MethodTable::GetMDImport()
 }
 
 //==========================================================================================
+inline HRESULT MethodTable::GetCustomAttribute(
+                               WellKnownAttribute attribute,
+                               const void  **ppData,
+                               ULONG *pcbData)
+{
+    return GetModule()->GetCustomAttribute(GetCl(), attribute, ppData, pcbData);
+}
+
+//==========================================================================================
 inline BOOL MethodTable::IsSealed()
 {
     LIMITED_METHOD_CONTRACT;
@@ -1455,9 +1427,7 @@ inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer()
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, NULL);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1483,9 +1453,7 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer()
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, NULL);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1497,16 +1465,14 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer()
 #endif //!DACCESS_COMPILE
 
 //==========================================================================================
-inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread, PTR_AppDomain pDomain)
+inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread)
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, pDomain);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1516,16 +1482,14 @@ inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread
 }
 
 //==========================================================================================
-inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread, PTR_AppDomain pDomain)
+inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread)
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, pDomain);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1535,20 +1499,11 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread, P
 }
 
 //==========================================================================================
-inline PTR_DomainLocalModule MethodTable::GetDomainLocalModule(AppDomain * pAppDomain)
-{
-    WRAPPER_NO_CONTRACT;
-    return GetModuleForStatics()->GetDomainLocalModule(pAppDomain);
-}
-
-#ifndef DACCESS_COMPILE
-//==========================================================================================
 inline PTR_DomainLocalModule MethodTable::GetDomainLocalModule()
 {
     WRAPPER_NO_CONTRACT;
     return GetModuleForStatics()->GetDomainLocalModule();
 }
-#endif //!DACCESS_COMPILE
 
 //==========================================================================================
 inline OBJECTREF MethodTable::AllocateNoChecks()
@@ -1589,7 +1544,6 @@ inline BOOL MethodTable::UnBoxInto(void *dest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1601,7 +1555,7 @@ inline BOOL MethodTable::UnBoxInto(void *dest, OBJECTREF src)
         if (src == NULL || src->GetMethodTable() != this)
             return FALSE;
 
-        CopyValueClass(dest, src->UnBox(), this, src->GetAppDomain());
+        CopyValueClass(dest, src->UnBox(), this);
     }
     return TRUE;
 }
@@ -1615,7 +1569,6 @@ inline BOOL MethodTable::UnBoxIntoArg(ArgDestination *argDest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1627,7 +1580,7 @@ inline BOOL MethodTable::UnBoxIntoArg(ArgDestination *argDest, OBJECTREF src)
         if (src == NULL || src->GetMethodTable() != this)
             return FALSE;
 
-        CopyValueClassArg(argDest, src->UnBox(), this, src->GetAppDomain(), 0);
+        CopyValueClassArg(argDest, src->UnBox(), this, 0);
     }
     return TRUE;
 }
@@ -1641,7 +1594,6 @@ inline void MethodTable::UnBoxIntoUnchecked(void *dest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1655,7 +1607,7 @@ inline void MethodTable::UnBoxIntoUnchecked(void *dest, OBJECTREF src)
     {
         _ASSERTE(src->GetMethodTable()->GetNumInstanceFieldBytes() == GetNumInstanceFieldBytes());
 
-        CopyValueClass(dest, src->UnBox(), this, src->GetAppDomain());
+        CopyValueClass(dest, src->UnBox(), this);
     }
 }
 #endif
@@ -1668,7 +1620,6 @@ __forceinline TypeHandle::CastResult MethodTable::CanCastToClassOrInterfaceNoGC(
         GC_NOTRIGGER;
         MODE_ANY;
         INSTANCE_CHECK;
-        SO_TOLERANT;
         PRECONDITION(CheckPointer(pTargetMT));
         PRECONDITION(!pTargetMT->IsArray());
     }
@@ -1709,7 +1660,6 @@ FORCEINLINE PTR_Module MethodTable::GetGenericsStaticsModuleAndID(DWORD * pID)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -1785,7 +1735,6 @@ FORCEINLINE BOOL MethodTable::ImplementsInterfaceInline(MethodTable *pInterface)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         PRECONDITION(pInterface->IsInterface()); // class we are looking up should be an interface
     }
     CONTRACTL_END;

@@ -141,9 +141,6 @@ public:
     
     BOOL   HasID();
     ULONG GetIDHash();
-    
-    PTR_CVOID GetStrongNameSignature(COUNT_T *pSize = NULL);
-    
 
     // Refcount above images.
     ULONG AddRef();
@@ -162,7 +159,7 @@ public:
     BOOL Equals(PEImage *pImage);
 
     void GetMVID(GUID *pMvid);
-    const BOOL HasV1Metadata();
+    BOOL HasV1Metadata();
     IMDInternalImport* GetMDImport();
     BOOL MDImportLoaded();
     IMDInternalImport* GetNativeMDImport(BOOL loadAllowed = TRUE);    
@@ -180,17 +177,13 @@ public:
     static CHECK CheckCanonicalFullPath(const SString &path);
     static CHECK CheckStartup();
     PTR_CVOID GetMetadata(COUNT_T *pSize = NULL);
-    void GetHashedStrongNameSignature(SBuffer &result);
 
 #ifndef FEATURE_PAL
     static void GetPathFromDll(HINSTANCE hMod, SString &result);
-#endif // !FEATURE_PAL    
-    static LocaleID GetFileSystemLocale();
+#endif // !FEATURE_PAL
     static BOOL PathEquals(const SString &p1, const SString &p2);
     BOOL IsTrustedNativeImage(){LIMITED_METHOD_CONTRACT; return m_bIsTrustedNativeImage;};
     void SetIsTrustedNativeImage(){LIMITED_METHOD_CONTRACT; m_bIsTrustedNativeImage=TRUE;};
-    BOOL IsNativeImageInstall(){LIMITED_METHOD_CONTRACT; return m_bIsNativeImageInstall;}
-    void SetIsNativeImageInstall(){LIMITED_METHOD_CONTRACT; m_bIsNativeImageInstall=TRUE;};
 
     void SetModuleFileNameHintForDAC();
 #ifdef DACCESS_COMPILE
@@ -198,26 +191,23 @@ public:
     const SString &GetModuleFileNameHintForDAC();
 #endif
 
-    const BOOL HasNTHeaders();
-    const BOOL HasCorHeader(); 
-    const BOOL HasReadyToRunHeader();
-    void SetPassiveDomainOnly();
-    BOOL PassiveDomainOnly();
+    BOOL HasNTHeaders();
+    BOOL HasCorHeader();
+    BOOL HasReadyToRunHeader();
     BOOL IsReferenceAssembly();
-#ifdef FEATURE_PREJIT  
-    const BOOL IsNativeILILOnly();
-    const BOOL IsNativeILDll();
+#ifdef FEATURE_PREJIT
+    BOOL IsNativeILILOnly();
+    BOOL IsNativeILDll();
     void GetNativeILPEKindAndMachine(DWORD* pdwKind, DWORD* pdwMachine);
-    PTR_CVOID GetNativeManifestMetadata(COUNT_T *pSize = NULL);
 #endif
-    const BOOL HasDirectoryEntry(int entry);
-    const mdToken GetEntryPointToken();
-    const DWORD GetCorHeaderFlags(); 
-    const BOOL IsILOnly();
-    const BOOL IsDll();
-    const WORD GetSubsystem();
+    PTR_CVOID GetNativeManifestMetadata(COUNT_T *pSize = NULL);
+    BOOL HasDirectoryEntry(int entry);
+    mdToken GetEntryPointToken();
+    DWORD GetCorHeaderFlags();
+    BOOL IsILOnly();
+    BOOL IsDll();
+    WORD GetSubsystem();
     BOOL  IsFileLocked();
-    const BOOL HasStrongNameSignature();
 
     BOOL IsIbcOptimized();
     BOOL Has32BitNTHeaders();
@@ -293,8 +283,6 @@ private:
     SString     m_sModuleFileNameHintUsedByDac; // This is only used by DAC
 private:
     BOOL        m_bIsTrustedNativeImage;
-    BOOL        m_bIsNativeImageInstall;
-    BOOL        m_bPassiveDomainOnly;
 #ifdef FEATURE_LAZY_COW_PAGES
     BOOL        m_bAllocatedLazyCOWPages;
 #endif // FEATURE_LAZY_COW_PAGES
@@ -338,10 +326,6 @@ private:
 
     HANDLE m_hFile;
     bool   m_bOwnHandle;
-
-    BOOL        m_bSignatureInfoCached;
-    HRESULT   m_hrSignatureInfoStatus;
-    DWORD        m_dwSignatureInfo;    
 
     //@TODO:workaround: Remove this when we have one PEImage per mapped image,
     //@TODO:workaround: and move the lock there

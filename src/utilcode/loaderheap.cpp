@@ -4,7 +4,6 @@
 
 #include "stdafx.h"                     // Precompiled header key.
 #include "loaderheap.h"
-#include "perfcounters.h"
 #include "ex.h"
 #include "pedecoder.h"
 #define DONOT_DEFINE_ETW_CALLBACK
@@ -236,7 +235,6 @@ BOOL RangeList::IsInRangeWorker(TADDR address, TADDR *pID /* = NULL */)
         NOTHROW;
         FORBID_FAULT;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END
         
@@ -325,8 +323,8 @@ RangeList::RangeListBlock::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
         return;
     }
 
-    WIN64_ONLY( BADFOOD = 0xbaadf00dbaadf00d; );
-    NOT_WIN64(  BADFOOD = 0xbaadf00d;         );
+    BIT64_ONLY( BADFOOD = 0xbaadf00dbaadf00d; );
+    NOT_BIT64(  BADFOOD = 0xbaadf00d;         );
 
     for (i=0; i<RANGE_COUNT; i++)
     {

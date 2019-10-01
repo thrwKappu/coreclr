@@ -36,18 +36,16 @@ int LinearScan::BuildLclHeap(GenTree* tree)
     //
     //  Size?                   Init Memory?    # temp regs
     //   0                          -               0
-    //   const and <=4 str instr    -             hasPspSym ? 1 : 0
-    //   const and <PageSize        No            hasPspSym ? 1 : 0
-    //   >4 ptr words               Yes           hasPspSym ? 2 : 1
-    //   Non-const                  Yes           hasPspSym ? 2 : 1
-    //   Non-const                  No            hasPspSym ? 2 : 1
-
-    bool hasPspSym;
-#if FEATURE_EH_FUNCLETS
-    hasPspSym = (compiler->lvaPSPSym != BAD_VAR_NUM);
-#else
-    hasPspSym = false;
-#endif
+    //   const and <=4 str instr    -               0
+    //   const and <PageSize        No              0
+    //   >4 ptr words               Yes             1
+    //   Non-const                  Yes             1
+    //   Non-const                  No              1
+    //
+    // If the outgoing argument space is too large to encode in an "add/sub sp, icon"
+    // instruction, we also need a temp (we can use the same temp register needed
+    // for the other cases above, if there are multiple conditions that require a
+    // temp register).
 
     GenTree* size = tree->gtGetOp1();
     int      internalIntCount;
@@ -87,19 +85,23 @@ int LinearScan::BuildLclHeap(GenTree* tree)
             {
                 internalIntCount = 1;
             }
-
-            if (hasPspSym)
-            {
-                internalIntCount++;
-            }
         }
     }
     else
     {
-        // target (regCnt) + tmp + [psp]
+        // target (regCnt) + tmp
         srcCount         = 1;
-        internalIntCount = hasPspSym ? 2 : 1;
+        internalIntCount = 1;
         BuildUse(size);
+    }
+
+    // If we have an outgoing argument space, we are going to probe that SP change, and we require
+    // a temporary register for doing the probe. Note also that if the outgoing argument space is
+    // large enough that it can't be directly encoded in SUB/ADD instructions, we also need a temp
+    // register to load the large sized constant into a register.
+    if (compiler->lvaOutgoingArgSpaceSize > 0)
+    {
+        internalIntCount = 1;
     }
 
     // If we are needed in temporary registers we should be sure that
@@ -228,10 +230,9 @@ int LinearScan::BuildNode(GenTree* tree)
             // is processed, unless this is marked "isLocalDefUse" because it is a stack-based argument
             // to a call or an orphaned dead node.
             //
-            LclVarDsc* const varDsc = &compiler->lvaTable[tree->AsLclVarCommon()->gtLclNum];
+            LclVarDsc* const varDsc = &compiler->lvaTable[tree->AsLclVarCommon()->GetLclNum()];
             if (isCandidateVar(varDsc))
             {
-                INDEBUG(dumpNodeInfo(tree, dstCandidates, 0, 1));
                 return 0;
             }
             srcCount = 0;
@@ -421,6 +422,13 @@ int LinearScan::BuildNode(GenTree* tree)
         case GT_PROF_HOOK:
             srcCount = 0;
             assert(dstCount == 0);
+            break;
+
+        case GT_START_PREEMPTGC:
+            // This kills GC refs in callee save regs
+            srcCount = 0;
+            assert(dstCount == 0);
+            BuildDefsWithKills(tree, 0, RBM_NONE, RBM_NONE);
             break;
 
         case GT_LONG:
@@ -800,7 +808,6 @@ int LinearScan::BuildNode(GenTree* tree)
     assert(isLocalDefUse == (tree->IsValue() && tree->IsUnusedValue()));
     assert(!tree->IsUnusedValue() || (dstCount != 0));
     assert(dstCount == tree->GetRegisterDstCount());
-    INDEBUG(dumpNodeInfo(tree, dstCandidates, srcCount, dstCount));
     return srcCount;
 }
 

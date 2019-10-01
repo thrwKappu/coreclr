@@ -7,11 +7,23 @@ set(MDHOTDATA_SOURCES
   hotheapwriter.cpp
 )
 
-convert_to_absolute_path(MDHOTDATA_SOURCES ${MDHOTDATA_SOURCES})
+set(MDHOTDATA_HEADERS
+  ../../inc/metamodelpub.h
+  ../databuffer.h
+  ../heaps/export.h
+  ../inc/streamutil.h
+  ./export.h
+  heapindex.h
+  hotdataformat.h
+  hotheap.h
+  hotheapsdirectoryiterator.h
+  hotheapwriter.h
+  hotmetadata.h
+  hottable.h
+)
 
-if(CLR_CMAKE_PLATFORM_UNIX)
-    add_compile_options(-fPIC)
-endif(CLR_CMAKE_PLATFORM_UNIX)
+convert_to_absolute_path(MDHOTDATA_HEADERS ${MDHOTDATA_HEADERS})
+convert_to_absolute_path(MDHOTDATA_SOURCES ${MDHOTDATA_SOURCES})
 
 add_subdirectory(dac)
 add_subdirectory(full)

@@ -47,26 +47,7 @@ enum VNFunc
     VNF_COUNT
 };
 
-enum VNOperKind
-{
-    VOK_Default,
-    VOK_Unsigned,
-    VOK_OverflowCheck,
-    VOK_Unsigned_OverflowCheck
-};
-
-// Given the bool values isUnsigned and overflowCheck return the proper VNOperKInd enum
-//
-VNOperKind VNGetOperKind(bool isUnsigned, bool overflowCheck);
-
-// Given an "oper" and associated flags with it, transform the oper into a
-// more accurate oper that can be used in evaluation.
-// For example, (GT_ADD, true, false) transforms to GT_ADD_UN
-// and (GT_ADD, false, true) transforms to GT_ADD_OVF
-//
-VNFunc GetVNFuncForOper(genTreeOps oper, VNOperKind operKind);
-
-// Given a GenTree node return the VNFunc that shodul be used when value numbering
+// Given a GenTree node return the VNFunc that should be used when value numbering
 //
 VNFunc GetVNFuncForNode(GenTree* node);
 
@@ -281,7 +262,7 @@ public:
     ValueNum VNForLongCon(INT64 cnsVal);
     ValueNum VNForFloatCon(float cnsVal);
     ValueNum VNForDoubleCon(double cnsVal);
-    ValueNum VNForByrefCon(INT64 byrefVal);
+    ValueNum VNForByrefCon(size_t byrefVal);
 
 #ifdef _TARGET_64BIT_
     ValueNum VNForPtrSizeIntCon(INT64 cnsVal)
@@ -397,12 +378,25 @@ public:
 
     ValueNumPair VNPWithExc(ValueNumPair vnp, ValueNumPair excSetVNP);
 
-    // If "vnWx" is a "VNF_ValWithExc(normal, excSet)" value, this sets "*pvn" to the Normal value
-    // and sets "*pvnx" to Exception set value.  Otherwise, this just sets "*pvn" to to the Normal value.
+    // This sets "*pvn" to the Normal value and sets "*pvnx" to Exception set value.
     // "pvnx" represents the set of all exceptions that can happen for the expression
     void VNUnpackExc(ValueNum vnWx, ValueNum* pvn, ValueNum* pvnx);
 
     void VNPUnpackExc(ValueNumPair vnWx, ValueNumPair* pvn, ValueNumPair* pvnx);
+
+    // This returns the Union of exceptions from vnWx and vnExcSet
+    ValueNum VNUnionExcSet(ValueNum vnWx, ValueNum vnExcSet);
+
+    // This returns the Union of exceptions from vnpWx and vnpExcSet
+    ValueNumPair VNPUnionExcSet(ValueNumPair vnpWx, ValueNumPair vnpExcSet);
+
+    // Sets the normal value to a new unique ValueNum
+    // Keeps any Exception set values
+    ValueNum VNMakeNormalUnique(ValueNum vn);
+
+    // Sets the liberal & conservative
+    // Keeps any Exception set values
+    ValueNumPair VNPMakeNormalUniquePair(ValueNumPair vnp);
 
     // If "vn" is a "VNF_ValWithExc(norm, excSet)" value, returns the "norm" argument; otherwise,
     // just returns "vn".
@@ -723,12 +717,6 @@ public:
     struct VarTypConv
     {
     };
-
-    // Return true if two value numbers would compare equal.
-    bool VNIsEqual(ValueNum vn1, ValueNum vn2)
-    {
-        return (vn1 == vn2) && (vn1 != NoVN) && !varTypeIsFloating(TypeOfVN(vn1));
-    }
 
 private:
     struct Chunk;
@@ -1237,12 +1225,13 @@ private:
         return m_doubleCnsMap;
     }
 
-    LongToValueNumMap* m_byrefCnsMap;
-    LongToValueNumMap* GetByrefCnsMap()
+    typedef VNMap<size_t> ByrefToValueNumMap;
+    ByrefToValueNumMap*   m_byrefCnsMap;
+    ByrefToValueNumMap*   GetByrefCnsMap()
     {
         if (m_byrefCnsMap == nullptr)
         {
-            m_byrefCnsMap = new (m_alloc) LongToValueNumMap(m_alloc);
+            m_byrefCnsMap = new (m_alloc) ByrefToValueNumMap(m_alloc);
         }
         return m_byrefCnsMap;
     }
@@ -1388,8 +1377,8 @@ struct ValueNumStore::VarTypConv<TYP_DOUBLE>
 template <>
 struct ValueNumStore::VarTypConv<TYP_BYREF>
 {
-    typedef INT64 Type;
-    typedef void* Lang;
+    typedef size_t Type;
+    typedef void*  Lang;
 };
 template <>
 struct ValueNumStore::VarTypConv<TYP_REF>

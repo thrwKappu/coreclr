@@ -63,7 +63,6 @@ Revision History:
 
 #define CO_E_CLASSSTRING                 _HRESULT_TYPEDEF_(0x800401F3L)
 
-#define URL_E_INVALID_SYNTAX             _HRESULT_TYPEDEF_(0x80041001L)
 #define MK_E_SYNTAX                      _HRESULT_TYPEDEF_(0x800401E4L)
 
 #define STG_E_INVALIDFUNCTION            _HRESULT_TYPEDEF_(0x80030001L)
@@ -181,7 +180,7 @@ inline void *__cdecl operator new(size_t, void *_P)
 #define ARGUMENT_PRESENT(ArgumentPointer)    (\
     (CHAR *)(ArgumentPointer) != (CHAR *)(NULL) )
 
-#if defined(_WIN64)
+#if defined(BIT64)
 #define MAX_NATURAL_ALIGNMENT sizeof(ULONGLONG)
 #else
 #define MAX_NATURAL_ALIGNMENT sizeof(ULONG)
@@ -215,6 +214,7 @@ inline void *__cdecl operator new(size_t, void *_P)
 
 #define STDAPI               EXTERN_C HRESULT STDAPICALLTYPE
 #define STDAPI_(type)        EXTERN_C type STDAPICALLTYPE
+#define STDAPI_VIS(vis,type) EXTERN_C vis type STDAPICALLTYPE
 
 #define STDAPIV              EXTERN_C HRESULT STDAPIVCALLTYPE
 #define STDAPIV_(type)       EXTERN_C type STDAPIVCALLTYPE
@@ -373,9 +373,9 @@ typedef union _ULARGE_INTEGER {
 
 /******************* OLE, BSTR, VARIANT *************************/
 
-STDAPI_(LPVOID) CoTaskMemAlloc(SIZE_T cb);
-STDAPI_(LPVOID) CoTaskMemRealloc(LPVOID pv, SIZE_T cb);
-STDAPI_(void) CoTaskMemFree(LPVOID pv);
+STDAPI_VIS(DLLEXPORT, LPVOID) CoTaskMemAlloc(SIZE_T cb);
+STDAPI_VIS(DLLEXPORT, LPVOID) CoTaskMemRealloc(LPVOID pv, SIZE_T cb);
+STDAPI_VIS(DLLEXPORT, void) CoTaskMemFree(LPVOID pv);
 
 typedef SHORT VARIANT_BOOL;
 #define VARIANT_TRUE ((VARIANT_BOOL)-1)
@@ -387,12 +387,12 @@ typedef const OLECHAR* LPCOLESTR;
 
 typedef WCHAR *BSTR;
 
-STDAPI_(BSTR) SysAllocString(const OLECHAR*);
-STDAPI_(BSTR) SysAllocStringLen(const OLECHAR*, UINT);
-STDAPI_(BSTR) SysAllocStringByteLen(const char *, UINT);
-STDAPI_(void) SysFreeString(BSTR);
-STDAPI_(UINT) SysStringLen(BSTR);
-STDAPI_(UINT) SysStringByteLen(BSTR);
+STDAPI_VIS(DLLEXPORT, BSTR) SysAllocString(const OLECHAR*);
+STDAPI_VIS(DLLEXPORT, BSTR) SysAllocStringLen(const OLECHAR*, UINT);
+STDAPI_VIS(DLLEXPORT, BSTR) SysAllocStringByteLen(const char *, UINT);
+STDAPI_VIS(DLLEXPORT, void) SysFreeString(BSTR);
+STDAPI_VIS(DLLEXPORT, UINT) SysStringLen(BSTR);
+STDAPI_VIS(DLLEXPORT, UINT) SysStringByteLen(BSTR);
 
 typedef double DATE;
 
@@ -629,7 +629,7 @@ STDAPI_(HRESULT) VariantClear(VARIANT * pvarg);
 #define V_UINTREF(X)     V_UNION(X, puintVal)
 #define V_ARRAY(X)       V_UNION(X, parray)
 
-#ifdef _WIN64
+#ifdef BIT64
 #define V_INT_PTR(X)        V_UNION(X, llVal)
 #define V_UINT_PTR(X)       V_UNION(X, ullVal)
 #define V_INT_PTRREF(X)     V_UNION(X, pllVal)
@@ -836,8 +836,6 @@ Remember to fix the errcode defintion in safecrt.h.
 #define _wfopen_s _wfopen_unsafe
 #define fopen_s _fopen_unsafe
 
-#define _strlwr_s _strlwr_unsafe
-
 #define _vscprintf _vscprintf_unsafe
 
 extern "C++" {
@@ -861,24 +859,6 @@ inline errno_t __cdecl _wcslwr_unsafe(WCHAR *str, size_t sz)
 
     _wcslwr(copy);
     wcscpy_s(str, sz, copy);
-    free(copy);
-	
-    return 0;
-}
-inline errno_t __cdecl _strlwr_unsafe(char *str, size_t sz)
-{
-    char *copy = (char *)malloc(sz);
-    if(copy == nullptr)
-        return 1;
-
-    errno_t retCode = strcpy_s(copy, sz, str);
-    if(retCode) {
-        free(copy);
-        return 1;
-    }
-
-    _strlwr(copy);
-    strcpy_s(str, sz, copy);
     free(copy);
 	
     return 0;
@@ -949,29 +929,6 @@ STDAPI_(BOOL) PathRenameExtensionW(LPWSTR pszPath, LPCWSTR pszExt);
 STDAPI_(BOOL) PathRemoveFileSpecW(LPWSTR pFile);
 STDAPI_(void) PathStripPathW (LPWSTR pszPath);
 
-STDAPI PathCreateFromUrlW(LPCWSTR pszUrl, LPWSTR pszPath, LPDWORD pcchPath, DWORD dwFlags);
-STDAPI_(BOOL) PathIsURLW(LPCWSTR pszPath);
-
-
-#define URL_UNESCAPE                    0x10000000
-#define URL_ESCAPE_PERCENT              0x00001000
-
-typedef enum {
-    URLIS_FILEURL = 3,
-} URLIS;
-
-typedef enum {
-    URL_PART_SCHEME     = 1,
-    URL_PART_HOSTNAME   = 2,
-} URL_PART;
-
-STDAPI UrlCanonicalizeW(LPCWSTR pszUrl, LPWSTR pszCanonicalized, LPDWORD pcchCanonicalized, DWORD dwFlags);
-STDAPI UrlCombineW(LPCWSTR pszBase, LPCWSTR pszRelative, LPWSTR pszCombined, LPDWORD pcchCombined, DWORD dwFlags);
-STDAPI UrlEscapeW(LPCWSTR pszUrl, LPWSTR pszEscaped, LPDWORD pcchEscaped, DWORD dwFlags);
-STDAPI UrlUnescapeW(LPWSTR pszURL, LPWSTR pszUnescaped, LPDWORD pcchUnescaped, DWORD dwFlags);
-STDAPI_(BOOL) UrlIsW(LPCWSTR pszUrl, URLIS dwUrlIs);
-STDAPI UrlGetPartW(LPCWSTR pszIn, LPWSTR pszOut, LPDWORD pcchOut, DWORD dwPart, DWORD dwFlags);
-
 #ifdef UNICODE
 #define PathAppend          PathAppendW
 #define PathCommonPrefix    PathCommonPrefixW
@@ -991,15 +948,6 @@ STDAPI UrlGetPartW(LPCWSTR pszIn, LPWSTR pszOut, LPDWORD pcchOut, DWORD dwPart, 
 #define PathRenameExtension PathRenameExtensionW
 #define PathStripPath       PathStripPathW
 
-#define PathCreateFromUrl   PathCreateFromUrlW
-#define PathIsURL           PathIsURLW
-
-#define UrlCanonicalize     UrlCanonicalizeW
-#define UrlCombine          UrlCombineW
-#define UrlEscape           UrlEscapeW
-#define UrlUnescape         UrlUnescapeW 
-#define UrlIs               UrlIsW
-#define UrlGetPart          UrlGetPartW
 
 #endif // UNICODE
 
@@ -1165,8 +1113,9 @@ typedef JIT_DEBUG_INFO JIT_DEBUG_INFO32, *LPJIT_DEBUG_INFO32;
 typedef JIT_DEBUG_INFO JIT_DEBUG_INFO64, *LPJIT_DEBUG_INFO64;
 
 /******************* resources ***************************************/
-
+#define IS_INTRESOURCE(_r) ((((ULONG_PTR)(_r)) >> 16) == 0)
 #define MAKEINTRESOURCEW(i) ((LPWSTR)((ULONG_PTR)((WORD)(i))))
+#define MAKEINTRESOURCE(i) ((LPWSTR)((ULONG_PTR)((WORD)(i))))
 #define RT_RCDATA           MAKEINTRESOURCE(10)
 #define RT_VERSION          MAKEINTRESOURCE(16)
 
@@ -1332,8 +1281,6 @@ typedef OUT_OF_PROCESS_FUNCTION_TABLE_CALLBACK *POUT_OF_PROCESS_FUNCTION_TABLE_C
 #define OUT_OF_PROCESS_FUNCTION_TABLE_CALLBACK_EXPORT_NAME \
     "OutOfProcessFunctionTableCallback"
 
-#if defined(FEATURE_PAL_SXS)
-
 // #if !defined(_TARGET_MAC64)
 // typedef LONG (*PEXCEPTION_ROUTINE)(
     // IN PEXCEPTION_POINTERS pExceptionPointers,
@@ -1454,8 +1401,6 @@ typedef DISPATCHER_CONTEXT *PDISPATCHER_CONTEXT;
 #define ExceptionStackUnwind        EXCEPTION_EXECUTE_HANDLER
 #define ExceptionContinueExecution  EXCEPTION_CONTINUE_EXECUTION
 
-#endif // FEATURE_PAL_SXS
-
 typedef struct _EXCEPTION_REGISTRATION_RECORD EXCEPTION_REGISTRATION_RECORD;
 typedef EXCEPTION_REGISTRATION_RECORD *PEXCEPTION_REGISTRATION_RECORD;
 
@@ -1561,10 +1506,6 @@ typedef struct tagVS_FIXEDFILEINFO
 /******************** external includes *************************/
 
 #include "ntimage.h"
-#ifndef PAL_STDCPP_COMPAT
-#include "cpp/ccombstr.h"
-#include "cpp/cstring.h"
-#endif // !PAL_STDCPP_COMPAT
 
 #endif // RC_INVOKED
 

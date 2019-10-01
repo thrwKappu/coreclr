@@ -159,7 +159,7 @@ class ZapInfo
     ZapBlobWithRelocs *         m_pColdCode;
     ZapBlobWithRelocs *         m_pROData;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
     // Unwind info of the main method body. It will get merged with GC info.
     BYTE *                      m_pMainUnwindInfo;
     ULONG                       m_cbMainUnwindInfo;
@@ -169,7 +169,7 @@ class ZapInfo
 #if defined(_TARGET_AMD64_)
     ZapUnwindInfo *             m_pChainedColdUnwindInfo;
 #endif
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
     ZapExceptionInfo *          m_pExceptionInfo;
 
@@ -307,15 +307,15 @@ public:
     int  doAssert(const char* szFile, int iLine, const char* szExpr);
     void reportFatalError(CorJitResult result);
 
-    HRESULT allocBBProfileBuffer (
-            ULONG cBlock,
-            ICorJitInfo::ProfileBuffer ** ppBlock);
+    HRESULT allocMethodBlockCounts (
+            UINT32 count,
+            ICorJitInfo::BlockCounts ** pBlockCounts);
 
-    HRESULT getBBProfileData (
+    HRESULT getMethodBlockCounts (
             CORINFO_METHOD_HANDLE ftnHnd,
-            ULONG * size,
-            ICorJitInfo::ProfileBuffer ** profileBuffer,
-            ULONG * numRuns);
+            UINT32 * pCount,
+            ICorJitInfo::BlockCounts ** pBlockCounts,
+            UINT32 * pNumRuns);
 
     DWORD getJitFlags(CORJIT_FLAGS* jitFlags, DWORD sizeInBytes);
 
@@ -417,6 +417,9 @@ public:
 
     void * getFieldAddress(CORINFO_FIELD_HANDLE field,
                                     void **ppIndirection);
+    CORINFO_CLASS_HANDLE getStaticFieldCurrentClass(CORINFO_FIELD_HANDLE field,
+                                                    bool* pIsSpeculative);
+
     DWORD getFieldThreadLocalStoreID (CORINFO_FIELD_HANDLE field,
                                                 void **ppIndirection);
     CORINFO_VARARGS_HANDLE getVarArgsHandle(CORINFO_SIG_INFO *sig,
@@ -518,6 +521,7 @@ public:
                                   BOOL fFullInst,
                                   BOOL fAssembly);
     BOOL isValueClass(CORINFO_CLASS_HANDLE clsHnd);
+    CorInfoInlineTypeCheck canInlineTypeCheck(CORINFO_CLASS_HANDLE cls, CorInfoInlineTypeCheckSource source);
     BOOL canInlineTypeCheckWithObjectVTable(CORINFO_CLASS_HANDLE clsHnd);
     DWORD getClassAttribs(CORINFO_CLASS_HANDLE cls);
     BOOL isStructRequiringStackAllocRetBuf(CORINFO_CLASS_HANDLE cls);
@@ -546,7 +550,7 @@ public:
 
     unsigned getClassNumInstanceFields(CORINFO_CLASS_HANDLE cls);
 
-    CorInfoHelpFunc getNewHelper(CORINFO_RESOLVED_TOKEN * pResolvedToken, CORINFO_METHOD_HANDLE callerHandle);
+    CorInfoHelpFunc getNewHelper(CORINFO_RESOLVED_TOKEN * pResolvedToken, CORINFO_METHOD_HANDLE callerHandle, bool * pHasSideEffects = NULL);
     CorInfoHelpFunc getCastingHelper(CORINFO_RESOLVED_TOKEN * pResolvedToken, bool fThrowing);
     CorInfoHelpFunc getNewArrHelper(CORINFO_CLASS_HANDLE arrayCls);
     CorInfoHelpFunc getSharedCCtorHelper(CORINFO_CLASS_HANDLE clsHnd);
@@ -587,6 +591,9 @@ public:
 
     CORINFO_CLASS_HANDLE mergeClasses(CORINFO_CLASS_HANDLE cls1,
                                 CORINFO_CLASS_HANDLE cls2);
+    BOOL isMoreSpecificType(CORINFO_CLASS_HANDLE cls1,
+                                CORINFO_CLASS_HANDLE cls2);
+
     BOOL shouldEnforceCallvirtRestriction(CORINFO_MODULE_HANDLE scope);
     CORINFO_CLASS_HANDLE getParentType(CORINFO_CLASS_HANDLE  cls);
     CorInfoType getChildType (CORINFO_CLASS_HANDLE       clsHnd,
@@ -630,7 +637,8 @@ public:
                                         const char **moduleName);
     const char* getMethodNameFromMetadata(CORINFO_METHOD_HANDLE ftn,
                                           const char **className,
-                                          const char **namespaceName);
+                                          const char **namespaceName,
+                                          const char **enclosingClassName);
 
     unsigned getMethodHash(CORINFO_METHOD_HANDLE ftn);
     DWORD getMethodAttribs(CORINFO_METHOD_HANDLE ftn);

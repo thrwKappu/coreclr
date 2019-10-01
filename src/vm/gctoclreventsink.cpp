@@ -205,6 +205,12 @@ void GCToCLREventSink::FirePinObjectAtGCTime(void* object, uint8_t** ppObject)
     EX_END_CATCH(SwallowAllExceptions)
 }
 
+void GCToCLREventSink::FirePinPlugAtGCTime(uint8_t* plugStart, uint8_t* plugEnd, uint8_t* gapBeforeSize)
+{
+    LIMITED_METHOD_CONTRACT;
+    FireEtwPinPlugAtGCTime(plugStart, plugEnd, gapBeforeSize, GetClrInstanceId());
+}
+
 void GCToCLREventSink::FireGCPerHeapHistory_V3(void *freeListAllocated,
                                                void *freeListRejected,
                                                void *endOfSegAllocated,
@@ -258,6 +264,11 @@ void GCToCLREventSink::FireBGC1stConEnd()
     FireEtwBGC1stConEnd(GetClrInstanceId());
 }
 
+void GCToCLREventSink::FireBGC1stSweepEnd(uint32_t genNumber)
+{    
+    FireEtwBGC1stSweepEnd(genNumber, GetClrInstanceId());
+}
+
 void GCToCLREventSink::FireBGC2ndNonConBegin()
 {
     FireEtwBGC2ndNonConBegin(GetClrInstanceId());
@@ -308,14 +319,14 @@ void GCToCLREventSink::FireGCFullNotify_V1(uint32_t genNumber, uint32_t isAlloc)
     FireEtwGCFullNotify_V1(genNumber, isAlloc, GetClrInstanceId());
 }
 
-void GCToCLREventSink::FireSetGCHandle(void *handleID, void *objectID, uint32_t kind, uint32_t generation, uint64_t appDomainID)
+void GCToCLREventSink::FireSetGCHandle(void *handleID, void *objectID, uint32_t kind, uint32_t generation)
 {
-    FireEtwSetGCHandle(handleID, objectID, kind, generation, appDomainID, GetClrInstanceId());
+    FireEtwSetGCHandle(handleID, objectID, kind, generation, (uint64_t)dac_cast<TADDR>(AppDomain::GetCurrentDomain()), GetClrInstanceId());
 }
 
-void GCToCLREventSink::FirePrvSetGCHandle(void *handleID, void *objectID, uint32_t kind, uint32_t generation, uint64_t appDomainID)
+void GCToCLREventSink::FirePrvSetGCHandle(void *handleID, void *objectID, uint32_t kind, uint32_t generation)
 {
-    FireEtwPrvSetGCHandle(handleID, objectID, kind, generation, appDomainID, GetClrInstanceId());
+    FireEtwPrvSetGCHandle(handleID, objectID, kind, generation, (uint64_t)dac_cast<TADDR>(AppDomain::GetCurrentDomain()), GetClrInstanceId());
 }
 
 void GCToCLREventSink::FireDestroyGCHandle(void *handleID)

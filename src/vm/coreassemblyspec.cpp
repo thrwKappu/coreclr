@@ -107,8 +107,7 @@ VOID  AssemblySpec::Bind(AppDomain      *pAppDomain,
                          BOOL            fThrowOnFileNotFound,
                          CoreBindResult *pResult,
                          BOOL fNgenExplicitBind /* = FALSE */,
-                         BOOL fExplicitBindToNativeImage /* = FALSE */,
-                         StackCrawlMark *pCallerStackMark /* = NULL */)
+                         BOOL fExplicitBindToNativeImage /* = FALSE */)
 {
     CONTRACTL
     {
@@ -127,7 +126,7 @@ VOID  AssemblySpec::Bind(AppDomain      *pAppDomain,
 
     pResult->Reset();    
 
-    if (m_wszCodeBase==NULL)
+    if (m_wszCodeBase == NULL)
     {
         GetFileOrDisplayName(0, assemblyDisplayName);
     }
@@ -141,7 +140,7 @@ VOID  AssemblySpec::Bind(AppDomain      *pAppDomain,
     ReleaseHolder<ICLRPrivAssembly> pPrivAsm;
     _ASSERTE(pBinder != NULL);
 
-    if (m_wszCodeBase==NULL && IsMscorlibSatellite())
+    if (m_wszCodeBase == NULL && IsMscorlibSatellite())
     {
         StackSString sSystemDirectory(SystemDomain::System()->SystemDirectory());
         StackSString tmpString;
@@ -160,9 +159,9 @@ VOID  AssemblySpec::Bind(AppDomain      *pAppDomain,
   
         hr = CCoreCLRBinderHelper::BindToSystemSatellite(sSystemDirectory, sSimpleName, sCultureName, &pPrivAsm);
     }
-    else if(m_wszCodeBase==NULL)
+    else if (m_wszCodeBase == NULL)
     {
-        // For name based binding these arguments shouldnt have been changed from default
+        // For name based binding these arguments shouldn't have been changed from default
         _ASSERTE(!fNgenExplicitBind && !fExplicitBindToNativeImage);
         SafeComHolder<IAssemblyName> pName;
         hr = CreateAssemblyNameObject(&pName, assemblyDisplayName, CANOF_PARSE_DISPLAY_NAME, NULL);
@@ -174,45 +173,22 @@ VOID  AssemblySpec::Bind(AppDomain      *pAppDomain,
     else
     {
         hr = pTPABinder->Bind(assemblyDisplayName,
-                           m_wszCodeBase,
-                           GetParentAssembly()? GetParentAssembly()->GetFile():NULL,
-                           fNgenExplicitBind,
-                           fExplicitBindToNativeImage,
-                          &pPrivAsm);
+                              m_wszCodeBase,
+                              GetParentAssembly() ? GetParentAssembly()->GetFile() : NULL,
+                              fNgenExplicitBind,
+                              fExplicitBindToNativeImage,
+                              &pPrivAsm);
     }
 
-    bool fBoundUsingTPABinder = false;
-    if(SUCCEEDED(hr))
-    {
-        _ASSERTE(pPrivAsm != nullptr);
-
-        if (AreSameBinderInstance(pTPABinder, reinterpret_cast<ICLRPrivBinder *>(pPrivAsm.Extract())))
-        {
-            fBoundUsingTPABinder = true;
-        }
-
-        result = BINDER_SPACE::GetAssemblyFromPrivAssemblyFast(pPrivAsm.Extract());
-        _ASSERTE(result != nullptr);
-    }
-    
     pResult->SetHRBindResult(hr);
     if (SUCCEEDED(hr))
     {
-        BOOL fIsInGAC = FALSE;
-        BOOL fIsOnTpaList = FALSE;
+        _ASSERTE(pPrivAsm != nullptr);
 
-        // Only initialize TPA/GAC status if we bound using DefaultContext
-        if (fBoundUsingTPABinder == true)
-        {
-            fIsInGAC = pAppDomain->IsImageFromTrustedPath(result->GetNativeOrILPEImage());
-            const SString &sImagePath = result->GetNativeOrILPEImage()->GetPath();
-            if (pTPABinder->IsInTpaList(sImagePath))
-            {
-                fIsOnTpaList = TRUE;
-            }
-        }
+        result = BINDER_SPACE::GetAssemblyFromPrivAssemblyFast(pPrivAsm.Extract());
+        _ASSERTE(result != nullptr);
 
-        pResult->Init(result,fIsInGAC, fIsOnTpaList);
+        pResult->Init(result);
     }
     else if (FAILED(hr) && (fThrowOnFileNotFound || (!Assembly::FileNotFound(hr))))
     {
@@ -325,11 +301,13 @@ STDAPI BinderAcquireImport(PEImage                  *pPEImage,
         if (!pLayout->CheckFormat())
             IfFailGo(COR_E_BADIMAGEFORMAT);
 
+#ifdef FEATURE_PREJIT
         if (bNativeImage && pPEImage->IsNativeILILOnly())
         {
             pPEImage->GetNativeILPEKindAndMachine(&pdwPAFlags[0], &pdwPAFlags[1]);
         }
         else
+#endif
         {
             pPEImage->GetPEKindAndMachine(&pdwPAFlags[0], &pdwPAFlags[1]);
         }

@@ -70,7 +70,7 @@ __forceinline T Interlocked::Exchange(T volatile *destination, T value)
     static_assert(sizeof(long) == sizeof(T), "Size of long must be the same as size of T");
     return _InterlockedExchange((long*)destination, value);
 #else
-    T result = __sync_swap(destination, value);
+    T result = __atomic_exchange_n(destination, value, __ATOMIC_ACQ_REL);
     ArmInterlockedOperationBarrier();
     return result;
 #endif
@@ -109,6 +109,37 @@ __forceinline T Interlocked::ExchangeAdd(T volatile *addend, T value)
 #ifdef _MSC_VER
     static_assert(sizeof(long) == sizeof(T), "Size of long must be the same as size of T");
     return _InterlockedExchangeAdd((long*)addend, value);
+#else
+    T result = __sync_fetch_and_add(addend, value);
+    ArmInterlockedOperationBarrier();
+    return result;
+#endif
+}
+
+template <typename T>
+__forceinline T Interlocked::ExchangeAdd64(T volatile* addend, T value)
+{
+#ifdef _MSC_VER
+    static_assert(sizeof(int64_t) == sizeof(T), "Size of LONGLONG must be the same as size of T");
+    return _InterlockedExchangeAdd64((int64_t*)addend, value);
+#else
+    T result = __sync_fetch_and_add(addend, value);
+    ArmInterlockedOperationBarrier();
+    return result;
+#endif
+}
+
+template <typename T>
+__forceinline T Interlocked::ExchangeAddPtr(T volatile* addend, T value)
+{
+#ifdef _MSC_VER
+#ifdef BIT64
+    static_assert(sizeof(int64_t) == sizeof(T), "Size of LONGLONG must be the same as size of T");
+    return _InterlockedExchangeAdd64((int64_t*)addend, value);
+#else
+    static_assert(sizeof(long) == sizeof(T), "Size of long must be the same as size of T");
+    return _InterlockedExchangeAdd((long*)addend, value);
+#endif
 #else
     T result = __sync_fetch_and_add(addend, value);
     ArmInterlockedOperationBarrier();
@@ -164,7 +195,7 @@ __forceinline T Interlocked::ExchangePointer(T volatile * destination, T value)
     return (T)(TADDR)_InterlockedExchange((long volatile *)(void* volatile *)destination, (long)(void*)value);
 #endif
 #else
-    T result = (T)(TADDR)__sync_swap((void* volatile *)destination, value);
+    T result = (T)(TADDR)__atomic_exchange_n((void* volatile *)destination, value, __ATOMIC_ACQ_REL);
     ArmInterlockedOperationBarrier();
     return result;
 #endif
@@ -180,7 +211,7 @@ __forceinline T Interlocked::ExchangePointer(T volatile * destination, std::null
     return (T)(TADDR)_InterlockedExchange((long volatile *)(void* volatile *)destination, (long)(void*)value);
 #endif
 #else
-    T result = (T)(TADDR)__sync_swap((void* volatile *)destination, value);
+    T result = (T)(TADDR)__atomic_exchange_n((void* volatile *)destination, value, __ATOMIC_ACQ_REL);
     ArmInterlockedOperationBarrier();
     return result;
 #endif

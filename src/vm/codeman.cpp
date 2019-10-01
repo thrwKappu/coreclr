@@ -33,10 +33,10 @@
 
 #include "configuration.h"
 
-#ifdef _WIN64
+#ifdef BIT64
 #define CHECK_DUPLICATED_STRUCT_LAYOUTS
 #include "../debug/daccess/fntableaccess.h"
-#endif // _WIN64
+#endif // BIT64
 
 #ifdef FEATURE_PERFMAP
 #include "perfmap.h"
@@ -302,8 +302,8 @@ void UnwindInfoTable::AddToUnwindInfoTable(UnwindInfoTable** unwindInfoPtr, PT_R
     // We could imagine being much more efficient for 'bulk' updates, but we don't try
     // because we assume that this is rare and we want to keep the code simple
 
-    int usedSpace = unwindInfo->cTableCurCount - unwindInfo->cDeletedEntries;
-    int desiredSpace = usedSpace * 5 / 4 + 1;        // Increase by 20%
+    ULONG usedSpace = unwindInfo->cTableCurCount - unwindInfo->cDeletedEntries;
+    ULONG desiredSpace = usedSpace * 5 / 4 + 1;        // Increase by 20%
     // Be more aggresive if we used all of our space; 
     if (usedSpace == unwindInfo->cTableMaxCount)
         desiredSpace = usedSpace * 3 / 2 + 1;        // Increase by 50%
@@ -449,7 +449,7 @@ extern CrstStatic g_StubUnwindInfoHeapSegmentsCrst;
     STANDARD_VM_CONTRACT;
     {
         // CodeHeapIterator holds the m_CodeHeapCritSec, which insures code heaps don't get deallocated while being walked
-        EEJitManager::CodeHeapIterator heapIterator(NULL, NULL);
+        EEJitManager::CodeHeapIterator heapIterator(NULL);
 
         // Currently m_CodeHeapCritSec is given the CRST_UNSAFE_ANYMODE flag which allows it to be taken in a GC_NOTRIGGER
         // region but also disallows GC_TRIGGERS.  We need GC_TRIGGERS because we take another lock.   Ideally we would
@@ -571,7 +571,7 @@ DeleteJitHeapCache
 
 
 #if !defined(DACCESS_COMPILE)
-EEJitManager::CodeHeapIterator::CodeHeapIterator(BaseDomain *pDomainFilter, LoaderAllocator *pLoaderAllocatorFilter)
+EEJitManager::CodeHeapIterator::CodeHeapIterator(LoaderAllocator *pLoaderAllocatorFilter)
     : m_lockHolder(&(ExecutionManager::GetEEJitManager()->m_CodeHeapCritSec)), m_Iterator(NULL, 0, NULL, 0)
 {
     CONTRACTL
@@ -583,7 +583,6 @@ EEJitManager::CodeHeapIterator::CodeHeapIterator(BaseDomain *pDomainFilter, Load
     CONTRACTL_END;
 
     m_pHeapList = NULL;
-    m_pDomain = pDomainFilter;
     m_pLoaderAllocator = pLoaderAllocatorFilter;
     m_pHeapList = ExecutionManager::GetEEJitManager()->GetCodeHeapList();
     if(m_pHeapList)
@@ -628,17 +627,11 @@ BOOL EEJitManager::CodeHeapIterator::Next()
             BYTE * code = m_Iterator.GetMethodCode();
             CodeHeader * pHdr = (CodeHeader *)(code - sizeof(CodeHeader));
             m_pCurrent = !pHdr->IsStubCodeBlock() ? pHdr->GetMethodDesc() : NULL;
-            if (m_pDomain && m_pCurrent)
-            {
-                BaseDomain *pCurrentBaseDomain = m_pCurrent->GetDomain();
-                if(pCurrentBaseDomain != m_pDomain)
-                    continue;
-            }
 
             // LoaderAllocator filter
             if (m_pLoaderAllocator && m_pCurrent)
             {
-                LoaderAllocator *pCurrentLoaderAllocator = m_pCurrent->GetLoaderAllocatorForCode();
+                LoaderAllocator *pCurrentLoaderAllocator = m_pCurrent->GetLoaderAllocator();
                 if(pCurrentLoaderAllocator != m_pLoaderAllocator)
                     continue;
             }
@@ -668,7 +661,6 @@ ExecutionManager::ReaderLockHolder::ReaderLockHolder(HostCallPreference hostCall
         NOTHROW;
         if (hostCallPreference == AllowHostCalls) { HOST_CALLS; } else { HOST_NOCALLS; }
         GC_NOTRIGGER;
-        SO_TOLERANT;
         CAN_TAKE_LOCK;
     } CONTRACTL_END;
 
@@ -703,7 +695,6 @@ ExecutionManager::ReaderLockHolder::~ReaderLockHolder()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -901,6 +892,35 @@ BOOL IsFunctionFragment(TADDR baseAddress, PTR_RUNTIME_FUNCTION pFunctionEntry)
 #endif
 }
 
+// When we have fragmented unwind we usually want to refer to the
+// unwind record that includes the prolog. We can find it by searching
+// back in the sequence of unwind records.
+PTR_RUNTIME_FUNCTION FindRootEntry(PTR_RUNTIME_FUNCTION pFunctionEntry, TADDR baseAddress)
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    PTR_RUNTIME_FUNCTION pRootEntry = pFunctionEntry;
+
+    if (pRootEntry != NULL)
+    {
+        // Walk backwards in the RUNTIME_FUNCTION array until we find a non-fragment.
+        // We're guaranteed to find one, because we require that a fragment live in a function or funclet
+        // that has a prolog, which will have non-fragment .xdata.
+        for (;;)
+        {
+            if (!IsFunctionFragment(baseAddress, pRootEntry))
+            {
+                // This is not a fragment; we're done
+                break;
+            }
+
+            --pRootEntry;
+        }
+    }
+
+    return pRootEntry;
+}
+
 #endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
 
 
@@ -928,7 +948,6 @@ ExecutionManager::ScanFlag ExecutionManager::GetScanFlags()
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         HOST_NOCALLS;
         SUPPORTS_DAC;
     } CONTRACTL_END;
@@ -970,7 +989,7 @@ void IJitManager::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
 
 #endif // #ifdef DACCESS_COMPILE
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
 
 PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFunction, /* out */ SIZE_T * pSize)
 {
@@ -1085,30 +1104,12 @@ TADDR IJitManager::GetFuncletStartAddress(EECodeInfo * pCodeInfo)
 #endif
 
     TADDR baseAddress = pCodeInfo->GetModuleBase();
-    TADDR funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
 
 #if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS)
-    // Is the RUNTIME_FUNCTION a fragment? If so, we need to walk backwards until we find the first
-    // non-fragment RUNTIME_FUNCTION, and use that one. This happens when we have very large functions
-    // and multiple RUNTIME_FUNCTION entries per function or funclet. However, all but the first will
-    // have the "F" bit set in the unwind data, indicating a fragment (with phantom prolog unwind codes).
-
-    for (;;)
-    {
-        if (!IsFunctionFragment(baseAddress, pFunctionEntry))
-        {
-            // This is not a fragment; we're done
-            break;
-        }
-
-        // We found a fragment. Walk backwards in the RUNTIME_FUNCTION array until we find a non-fragment.
-        // We're guaranteed to find one, because we require that a fragment live in a function or funclet
-        // that has a prolog, which will have non-fragment .xdata.
-        --pFunctionEntry;
-
-        funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
-    }
+    pFunctionEntry = FindRootEntry(pFunctionEntry, baseAddress);
 #endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
+
+    TADDR funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
 
     return funcletStartAddress;
 }
@@ -1178,7 +1179,7 @@ BOOL IJitManager::IsFilterFunclet(EECodeInfo * pCodeInfo)
     return false;
 }
 
-#else // WIN64EXCEPTIONS
+#else // FEATURE_EH_FUNCLETS
 
 PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFunction, /* out */ SIZE_T * pSize)
 {
@@ -1186,7 +1187,7 @@ PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFuncti
     return dac_cast<PTR_VOID>(pRuntimeFunction->UnwindData + moduleBase);
 }
 
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
 
 #ifndef CROSSGEN_COMPILE
@@ -1270,6 +1271,7 @@ void EEJitManager::SetCpuInfo()
 
     //
     // NOTE: This function needs to be kept in sync with Zapper::CompileAssembly()
+    // NOTE: This function needs to be kept in sync with compSetProcesor() in jit\compiler.cpp
     //
 
     CORJIT_FLAGS CPUCompileFlags;
@@ -1475,17 +1477,32 @@ void EEJitManager::SetCpuInfo()
     }
 #endif // defined(_TARGET_X86_) || defined(_TARGET_AMD64_)
 
-#if defined(_TARGET_ARM64_) && defined(FEATURE_PAL)
-    PAL_GetJitCpuCapabilityFlags(&CPUCompileFlags);
-#endif
-
 #if defined(_TARGET_ARM64_)
     static ConfigDWORD fFeatureSIMD;
     if (fFeatureSIMD.val(CLRConfig::EXTERNAL_FeatureSIMD) != 0)
     {
         CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_FEATURE_SIMD);
     }
-#endif
+#if defined(FEATURE_PAL)
+    PAL_GetJitCpuCapabilityFlags(&CPUCompileFlags);
+#elif defined(BIT64)
+    // FP and SIMD support are enabled by default
+    CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_SIMD);
+    CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_FP);
+    // PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE (30)
+    if (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE))
+    {
+        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_AES);
+        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_SHA1);
+        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_SHA256);
+    }
+    // PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE (31)
+    if (IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE))
+    {
+        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_HAS_ARM64_CRC32);
+    }
+#endif // BIT64
+#endif // _TARGET_ARM64_
 
     m_CPUCompileFlags = CPUCompileFlags;
 }
@@ -1504,8 +1521,6 @@ enum JIT_LOAD_STATUS
 {
     JIT_LOAD_STATUS_STARTING = 1001,                   // The JIT load process is starting. Start at a number that is somewhat uncommon (i.e., not zero or 1) to help distinguish from garbage, in process dumps.
     JIT_LOAD_STATUS_DONE_LOAD,                         // LoadLibrary of the JIT dll succeeded.
-    JIT_LOAD_STATUS_DONE_GET_SXSJITSTARTUP,            // GetProcAddress for "sxsJitStartup" succeeded.
-    JIT_LOAD_STATUS_DONE_CALL_SXSJITSTARTUP,           // Calling sxsJitStartup() succeeded.
     JIT_LOAD_STATUS_DONE_GET_JITSTARTUP,               // GetProcAddress for "jitStartup" succeeded.
     JIT_LOAD_STATUS_DONE_CALL_JITSTARTUP,              // Calling jitStartup() succeeded.
     JIT_LOAD_STATUS_DONE_GET_GETJIT,                   // GetProcAddress for "getJit" succeeded.
@@ -1530,7 +1545,7 @@ JIT_LOAD_DATA g_JitLoadData;
 #if !defined(FEATURE_MERGE_JIT_AND_ENGINE)
 
 // Global that holds the path to custom JIT location
-extern "C" LPCWSTR g_CLRJITPath = nullptr;
+LPCWSTR g_CLRJITPath = nullptr;
 
 #endif // !defined(FEATURE_MERGE_JIT_AND_ENGINE)
 
@@ -1618,72 +1633,60 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName, OUT HINSTANCE* phJit, OUT I
 
         EX_TRY
         {
-            bool fContinueToLoadJIT = false;
-            // For CoreCLR, we never use "sxsJitStartup" as that is Desktop utilcode initialization
-            // specific. Thus, assume we always got 
-            fContinueToLoadJIT = true;
+            typedef void (__stdcall* pjitStartup)(ICorJitHost*);
+            pjitStartup jitStartupFn = (pjitStartup) GetProcAddress(*phJit, "jitStartup");
 
-            if (fContinueToLoadJIT)
+            if (jitStartupFn)
             {
-                typedef void (__stdcall* pjitStartup)(ICorJitHost*);
-                pjitStartup jitStartupFn = (pjitStartup) GetProcAddress(*phJit, "jitStartup");
+                pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_GET_JITSTARTUP;
 
-                if (jitStartupFn)
+                (*jitStartupFn)(JitHost::getJitHost());
+
+                pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_JITSTARTUP;
+            }
+
+            typedef ICorJitCompiler* (__stdcall* pGetJitFn)();
+            pGetJitFn getJitFn = (pGetJitFn) GetProcAddress(*phJit, "getJit");
+
+            if (getJitFn)
+            {
+                pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_GET_GETJIT;
+
+                ICorJitCompiler* pICorJitCompiler = (*getJitFn)();
+                if (pICorJitCompiler != NULL)
                 {
-                    pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_GET_JITSTARTUP;
+                    pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_GETJIT;
 
-                    (*jitStartupFn)(JitHost::getJitHost());
+                    GUID versionId;
+                    memset(&versionId, 0, sizeof(GUID));
+                    pICorJitCompiler->getVersionIdentifier(&versionId);
 
-                    pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_JITSTARTUP;
-                }
+                    pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_GETVERSIONIDENTIFIER;
 
-                typedef ICorJitCompiler* (__stdcall* pGetJitFn)();
-                pGetJitFn getJitFn = (pGetJitFn) GetProcAddress(*phJit, "getJit");
-
-                if (getJitFn)
-                {
-                    pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_GET_GETJIT;
-
-                    ICorJitCompiler* pICorJitCompiler = (*getJitFn)();
-                    if (pICorJitCompiler != NULL)
+                    if (memcmp(&versionId, &JITEEVersionIdentifier, sizeof(GUID)) == 0)
                     {
-                        pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_GETJIT;
+                        pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_VERSION_CHECK;
 
-                        GUID versionId;
-                        memset(&versionId, 0, sizeof(GUID));
-                        pICorJitCompiler->getVersionIdentifier(&versionId);
+                        // The JIT has loaded and passed the version identifier test, so publish the JIT interface to the caller.
+                        *ppICorJitCompiler = pICorJitCompiler;
 
-                        pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_CALL_GETVERSIONIDENTIFIER;
-
-                        if (memcmp(&versionId, &JITEEVersionIdentifier, sizeof(GUID)) == 0)
-                        {
-                            pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE_VERSION_CHECK;
-
-                            // The JIT has loaded and passed the version identifier test, so publish the JIT interface to the caller.
-                            *ppICorJitCompiler = pICorJitCompiler;
-
-                            // The JIT is completely loaded and initialized now.
-                            pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE;
-                        }
-                        else
-                        {
-                            // Mismatched version ID. Fail the load.
-                            LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: mismatched JIT version identifier in %S\n", pwzJitName));
-                        }
+                        // The JIT is completely loaded and initialized now.
+                        pJitLoadData->jld_status = JIT_LOAD_STATUS_DONE;
                     }
                     else
                     {
-                        LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: failed to get ICorJitCompiler in %S\n", pwzJitName));
+                        // Mismatched version ID. Fail the load.
+                        LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: mismatched JIT version identifier in %S\n", pwzJitName));
                     }
                 }
                 else
                 {
-                    LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: failed to find 'getJit' entrypoint in %S\n", pwzJitName));
+                    LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: failed to get ICorJitCompiler in %S\n", pwzJitName));
                 }
             }
             else
             {
-                LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: failed to find 'sxsJitStartup' entrypoint in %S\n", pwzJitName));
+                LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: failed to find 'getJit' entrypoint in %S\n", pwzJitName));
             }
         }
         EX_CATCH
@@ -1703,9 +1706,6 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName, OUT HINSTANCE* phJit, OUT I
 EXTERN_C void __stdcall jitStartup(ICorJitHost* host);
 EXTERN_C ICorJitCompiler* __stdcall getJit();
 #endif // FEATURE_MERGE_JIT_AND_ENGINE
-
-// Set this to the result of LoadJIT as a courtesy to code:CorCompileGetRuntimeDll
-extern HMODULE s_ngenCompilerDll;
 
 BOOL EEJitManager::LoadJIT()
 {
@@ -1750,9 +1750,6 @@ BOOL EEJitManager::LoadJIT()
 
     g_JitLoadData.jld_id = JIT_LOAD_MAIN;
     LoadAndInitializeJIT(ExecutionManager::GetJitName(), &m_JITCompiler, &newJitCompiler, &g_JitLoadData);
-
-    // Set as a courtesy to code:CorCompileGetRuntimeDll
-    s_ngenCompilerDll = m_JITCompiler;
 #endif // !FEATURE_MERGE_JIT_AND_ENGINE
 
 #ifdef ALLOW_SXS_JIT
@@ -2272,15 +2269,15 @@ void CodeHeapRequestInfo::Init()
     } CONTRACTL_END;
 
     if (m_pAllocator == NULL)
-        m_pAllocator = m_pMD->GetLoaderAllocatorForCode();
+        m_pAllocator = m_pMD->GetLoaderAllocator();
     m_isDynamicDomain = (m_pMD != NULL) ? m_pMD->IsLCGMethod() : false;
     m_isCollectible = m_pAllocator->IsCollectible() ? true : false;
     m_throwOnOutOfMemoryWithinRange = true;
 }
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
 
-#ifdef _WIN64
+#ifdef BIT64
 extern "C" PT_RUNTIME_FUNCTION GetRuntimeFunctionCallback(IN ULONG64   ControlPc,
                                                         IN PVOID     Context)
 #else
@@ -2296,11 +2293,6 @@ extern "C" PT_RUNTIME_FUNCTION GetRuntimeFunctionCallback(IN ULONG     ControlPc
     BEGIN_PRESERVE_LAST_ERROR;
 
 #ifdef ENABLE_CONTRACTS
-    // See comment in code:Thread::SwitchIn and SwitchOut.
-    Thread *pThread = GetThread();
-    if (!(pThread && pThread->HasThreadStateNC(Thread::TSNC_InTaskSwitch)))
-    {
-
     // Some 64-bit OOM tests use the hosting interface to re-enter the CLR via
     // RtlVirtualUnwind to track unique stacks at each failure point. RtlVirtualUnwind can
     // result in the EEJitManager taking a reader lock. This, in turn, results in a
@@ -2321,15 +2313,11 @@ extern "C" PT_RUNTIME_FUNCTION GetRuntimeFunctionCallback(IN ULONG     ControlPc
 
     LOG((LF_EH, LL_INFO1000000, "GetRuntimeFunctionCallback(%p) returned %p\n", ControlPc, prf));
 
-#ifdef ENABLE_CONTRACTS
-    }
-#endif // ENABLE_CONTRACTS
-
     END_PRESERVE_LAST_ERROR;
 
     return  prf;
 }
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
 HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapList *pADHeapList)
 {
@@ -2343,7 +2331,7 @@ HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapLi
     size_t initialRequestSize = pInfo->getRequestSize();
     size_t minReserveSize = VIRTUAL_ALLOC_RESERVE_GRANULARITY; //     ( 64 KB)
 
-#ifdef _WIN64
+#ifdef BIT64
     if (pInfo->m_hiAddr == 0)
     {
         if (pADHeapList->m_CodeHeapList.Count() > CODE_HEAP_SIZE_INCREASE_THRESHOLD)
@@ -2551,7 +2539,7 @@ void* EEJitManager::allocCodeRaw(CodeHeapRequestInfo *pInfo,
 }
 
 CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t reserveForJumpStubs, CorJitAllocMemFlag flag
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
                                     , UINT nUnwindInfos
                                     , TADDR * pModuleBase
 #endif
@@ -2577,13 +2565,7 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
 #if defined(_TARGET_X86_)
     // when not optimizing for code size, 8-byte align the method entry point, so that
     // the JIT can in turn 8-byte align the loop entry headers.
-    // 
-    // when ReJIT is enabled, 8-byte-align the method entry point so that we may use an
-    // 8-byte interlocked operation to atomically poke the top most bytes (e.g., to
-    // redirect the rejit jmp-stamp at the top of the method from the prestub to the
-    // rejitted code, or to reinstate original code on a revert).
-    else if ((g_pConfig->GenOptimizeType() != OPT_SIZE) ||
-        pMD->IsVersionableWithJumpStamp())
+    else if ((g_pConfig->GenOptimizeType() != OPT_SIZE))
     {
         alignment = max(alignment, 8);
     }
@@ -2663,7 +2645,7 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
         pCodeHdr->SetEHInfo(NULL);
         pCodeHdr->SetGCInfo(NULL);
         pCodeHdr->SetMethodDesc(pMD);
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         pCodeHdr->SetNumberOfUnwindInfos(nUnwindInfos);
         *pModuleBase = (TADDR)pCodeHeap;
 #endif
@@ -3682,7 +3664,6 @@ BOOL EEJitManager::JitCodeToMethodInfo(
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -3707,7 +3688,7 @@ BOOL EEJitManager::JitCodeToMethodInfo(
         // take into account cold code.
         pCodeInfo->m_relOffset = (DWORD)(PCODEToPINSTR(currentPC) - pCHdr->GetCodeStartAddress());
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         // Computed lazily by code:EEJitManager::LazyGetFunctionEntry
         pCodeInfo->m_pFunctionEntry = NULL;
 #endif
@@ -3725,7 +3706,6 @@ StubCodeBlockKind EEJitManager::GetStubCodeBlockKind(RangeSection * pRangeSectio
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -3741,7 +3721,6 @@ TADDR EEJitManager::FindMethodCode(PCODE currentPC)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -3877,13 +3856,14 @@ void EEJitManager::NibbleMapSet(HeapList * pHp, TADDR pCode, BOOL bSet)
 }
 #endif // !DACCESS_COMPILE
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
+// Note: This returns the root unwind record (the one that describes the prolog)
+// in cases where there is fragmented unwind.
 PTR_RUNTIME_FUNCTION EEJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 {
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -3907,6 +3887,14 @@ PTR_RUNTIME_FUNCTION EEJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 
         if (RUNTIME_FUNCTION__BeginAddress(pFunctionEntry) <= address && address < RUNTIME_FUNCTION__EndAddress(pFunctionEntry, baseAddress))
         {
+
+#if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS) && defined(_TARGET_ARM64_)
+            // If we might have fragmented unwind, and we're on ARM64, make sure
+            // to returning the root record, as the trailing records don't have
+            // prolog unwind codes.
+            pFunctionEntry = FindRootEntry(pFunctionEntry, baseAddress);
+#endif
+
             return pFunctionEntry;
         }
     }
@@ -4082,7 +4070,7 @@ Exit:
 
     END_PRESERVE_LAST_ERROR;
 }
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
 #ifdef DACCESS_COMPILE
 
@@ -4172,7 +4160,6 @@ ExecutionManager::FindCodeRange(PCODE currentPC, ScanFlag scanFlag)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -4193,7 +4180,6 @@ ExecutionManager::FindCodeRangeWithLock(PCODE currentPC)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -4215,6 +4201,21 @@ PCODE ExecutionManager::GetCodeStartAddress(PCODE currentPC)
 }
 
 //**************************************************************************
+NativeCodeVersion ExecutionManager::GetNativeCodeVersion(PCODE currentPC)
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        GC_NOTRIGGER;
+        FORBID_FAULT;
+    }
+    CONTRACTL_END;
+
+    EECodeInfo codeInfo(currentPC);
+    return codeInfo.IsValid() ? codeInfo.GetNativeCodeVersion() : NativeCodeVersion();
+}
+
+//**************************************************************************
 MethodDesc * ExecutionManager::GetCodeMethodDesc(PCODE currentPC)
 {
     CONTRACTL
@@ -4222,7 +4223,6 @@ MethodDesc * ExecutionManager::GetCodeMethodDesc(PCODE currentPC)
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -4238,7 +4238,6 @@ BOOL ExecutionManager::IsManagedCode(PCODE currentPC)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     if (currentPC == NULL)
@@ -4257,7 +4256,6 @@ BOOL ExecutionManager::IsManagedCodeWithLock(PCODE currentPC)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     ReaderLockHolder rlh;
@@ -4270,7 +4268,6 @@ BOOL ExecutionManager::IsManagedCode(PCODE currentPC, HostCallPreference hostCal
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
 #ifdef DACCESS_COMPILE
@@ -4301,7 +4298,6 @@ BOOL ExecutionManager::IsManagedCodeWorker(PCODE currentPC)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     // This may get called for arbitrary code addresses. Note that the lock is
@@ -4356,6 +4352,31 @@ BOOL ExecutionManager::IsManagedCodeWorker(PCODE currentPC)
     return FALSE;
 }
 
+//**************************************************************************
+// Assumes that it is safe not to take it the ExecutionManager reader/writer lock
+BOOL ExecutionManager::IsReadyToRunCode(PCODE currentPC)
+{
+    CONTRACTL{
+        NOTHROW;
+        GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    // This may get called for arbitrary code addresses. Note that the lock is
+    // taken over the call to JitCodeToMethodInfo too so that nobody pulls out 
+    // the range section from underneath us.
+
+#ifdef FEATURE_READYTORUN
+    RangeSection * pRS = GetRangeSection(currentPC);
+    if (pRS != NULL && (pRS->flags & RangeSection::RANGE_SECTION_READYTORUN))
+    {
+        if (dac_cast<PTR_ReadyToRunJitManager>(pRS->pjit)->JitCodeToMethodInfo(pRS, currentPC, NULL, NULL))
+            return TRUE;
+    }
+#endif
+
+    return FALSE;
+}
+
 #ifndef DACCESS_COMPILE
 
 //**************************************************************************
@@ -4397,7 +4418,7 @@ LPCWSTR ExecutionManager::GetJitName()
 #if !defined(CROSSGEN_COMPILE)
     if (g_CLRJITPath != nullptr)
     {
-        const wchar_t* p = wcsrchr(g_CLRJITPath, DIRECTORY_SEPARATOR_CHAR_W);
+        const WCHAR* p = wcsrchr(g_CLRJITPath, DIRECTORY_SEPARATOR_CHAR_W);
         if (p != nullptr)
         {
             pwzJitName = p + 1; // Return just the filename, not the directory name
@@ -4426,7 +4447,6 @@ RangeSection* ExecutionManager::GetRangeSection(TADDR addr)
         NOTHROW;
         HOST_NOCALLS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -4551,7 +4571,6 @@ PTR_Module ExecutionManager::FindZapModule(TADDR currentData)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
         STATIC_CONTRACT_HOST_CALLS;
         SUPPORTS_DAC;
@@ -4582,7 +4601,6 @@ PTR_Module ExecutionManager::FindReadyToRunModule(TADDR currentData)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
         STATIC_CONTRACT_HOST_CALLS;
         SUPPORTS_DAC;
@@ -4616,7 +4634,6 @@ PTR_Module ExecutionManager::FindModuleForGCRefMap(TADDR currentData)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -4986,7 +5003,7 @@ PCODE ExecutionManager::jumpStub(MethodDesc* pMD, PCODE target,
 
     if (pLoaderAllocator == NULL)
     {
-        pLoaderAllocator = pMD->GetLoaderAllocatorForCode();
+        pLoaderAllocator = pMD->GetLoaderAllocator();
     }
     _ASSERTE(pLoaderAllocator != NULL);
 
@@ -5233,6 +5250,116 @@ DONE:
 }
 #endif // !DACCESS_COMPILE && !CROSSGEN_COMPILE
 
+static void GetFuncletStartOffsetsHelper(PCODE pCodeStart, SIZE_T size, SIZE_T ofsAdj,
+    PTR_RUNTIME_FUNCTION pFunctionEntry, TADDR moduleBase,
+    DWORD * pnFunclets, DWORD* pStartFuncletOffsets, DWORD dwLength)
+{
+    _ASSERTE(FitsInU4((pCodeStart + size) - moduleBase));
+    DWORD endAddress = (DWORD)((pCodeStart + size) - moduleBase);
+
+    // Entries are sorted and terminated by sentinel value (DWORD)-1
+    for (; RUNTIME_FUNCTION__BeginAddress(pFunctionEntry) < endAddress; pFunctionEntry++)
+    {
+#ifdef _TARGET_AMD64_
+        _ASSERTE((pFunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT) == 0);
+#endif
+
+#if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS)
+        if (IsFunctionFragment(moduleBase, pFunctionEntry))
+        {
+            // This is a fragment (not the funclet beginning); skip it
+            continue;
+        }
+#endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
+
+        if (*pnFunclets < dwLength)
+        {
+            TADDR funcletStartAddress = (moduleBase + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry)) + ofsAdj;
+            _ASSERTE(FitsInU4(funcletStartAddress - pCodeStart));
+            pStartFuncletOffsets[*pnFunclets] = (DWORD)(funcletStartAddress - pCodeStart);
+        }
+        (*pnFunclets)++;
+    }
+}
+
+#if defined(FEATURE_EH_FUNCLETS) && defined(DACCESS_COMPILE)
+
+// 
+// To locate an entry in the function entry table (the program exceptions data directory), the debugger
+// performs a binary search over the table.  This function reports the entries that are encountered in the
+// binary search.
+// 
+// Parameters:
+//   pRtf: The target function table entry to be located
+//   pNativeLayout: A pointer to the loaded native layout for the module containing pRtf
+//   
+static void EnumRuntimeFunctionEntriesToFindEntry(PTR_RUNTIME_FUNCTION pRtf, PTR_PEImageLayout pNativeLayout)
+{
+    pRtf.EnumMem();
+
+    if (pNativeLayout == NULL)
+    {
+        return;
+    }
+
+    IMAGE_DATA_DIRECTORY * pProgramExceptionsDirectory = pNativeLayout->GetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_EXCEPTION);
+    if (!pProgramExceptionsDirectory ||
+        (pProgramExceptionsDirectory->Size == 0) ||
+        (pProgramExceptionsDirectory->Size % sizeof(T_RUNTIME_FUNCTION) != 0))
+    {
+        // Program exceptions directory malformatted
+        return;
+    }
+
+    PTR_BYTE moduleBase(pNativeLayout->GetBase());
+    PTR_RUNTIME_FUNCTION firstFunctionEntry(moduleBase + pProgramExceptionsDirectory->VirtualAddress);
+
+    if (pRtf < firstFunctionEntry ||
+        ((dac_cast<TADDR>(pRtf) - dac_cast<TADDR>(firstFunctionEntry)) % sizeof(T_RUNTIME_FUNCTION) != 0))
+    {
+        // Program exceptions directory malformatted
+        return;
+    }
+
+    // Review conversion of size_t to ULONG.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable:4267)
+#endif // defined(_MSC_VER)
+
+    ULONG indexToLocate = pRtf - firstFunctionEntry;
+
+#if defined(_MSC_VER)   
+#pragma warning(pop)
+#endif // defined(_MSC_VER)
+
+    ULONG low = 0; // index in the function entry table of low end of search range
+    ULONG high = (pProgramExceptionsDirectory->Size) / sizeof(T_RUNTIME_FUNCTION) - 1; // index of high end of search range
+    ULONG mid = (low + high) / 2; // index of entry to be compared
+
+    if (indexToLocate > high)
+    {
+        return;
+    }
+
+    while (indexToLocate != mid)
+    {
+        PTR_RUNTIME_FUNCTION functionEntry = firstFunctionEntry + mid;
+        functionEntry.EnumMem();
+        if (indexToLocate > mid)
+        {
+            low = mid + 1;
+        }
+        else
+        {
+            high = mid - 1;
+        }
+        mid = (low + high) / 2;
+        _ASSERTE(low <= mid && mid <= high);
+    }
+}
+#endif // FEATURE_EH_FUNCLETS
+
 #ifdef FEATURE_PREJIT
 //***************************************************************************************
 //***************************************************************************************
@@ -5476,7 +5603,6 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
                                             EECodeInfo * pCodeInfo)
 {
     CONTRACTL {
-        SO_TOLERANT;
         NOTHROW;
         GC_NOTRIGGER;
         SUPPORTS_DAC;
@@ -5524,7 +5650,7 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
         if (ColdMethodIndex < 0)
             return FALSE;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         // Save the raw entry
         int RawColdMethodIndex = ColdMethodIndex;
 
@@ -5573,7 +5699,7 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
             // We are using RUNTIME_FUNCTION as METHODTOKEN
             pCodeInfo->m_methodToken = METHODTOKEN(pRangeSection, dac_cast<TADDR>(FunctionEntry));
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
             PTR_RUNTIME_FUNCTION RawColdFunctionEntry = ColdFunctionTable + RawColdMethodIndex;
 #ifdef _TARGET_AMD64_
             if ((RawColdFunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT) != 0)
@@ -5613,7 +5739,7 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
         if (MethodIndex < 0)
             return FALSE;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         // Save the raw entry
         PTR_RUNTIME_FUNCTION RawFunctionEntry = FunctionTable + MethodIndex;;
 
@@ -5650,7 +5776,7 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
             // We are using RUNTIME_FUNCTION as METHODTOKEN
             pCodeInfo->m_methodToken = METHODTOKEN(pRangeSection, dac_cast<TADDR>(FunctionEntry));
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
             AMD64_ONLY(_ASSERTE((RawFunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT) == 0));
             pCodeInfo->m_pFunctionEntry = RawFunctionEntry;
 #endif
@@ -5660,7 +5786,7 @@ BOOL NativeImageJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
     return TRUE;
 }
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
 PTR_RUNTIME_FUNCTION NativeImageJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 {
     CONTRACTL {
@@ -5698,38 +5824,6 @@ TADDR NativeImageJitManager::GetFuncletStartAddress(EECodeInfo * pCodeInfo)
 #endif
 
     return IJitManager::GetFuncletStartAddress(pCodeInfo);
-}
-
-static void GetFuncletStartOffsetsHelper(PCODE pCodeStart, SIZE_T size, SIZE_T ofsAdj,
-                                         PTR_RUNTIME_FUNCTION pFunctionEntry, TADDR moduleBase,
-                                         DWORD * pnFunclets, DWORD* pStartFuncletOffsets, DWORD dwLength)
-{
-    _ASSERTE(FitsInU4((pCodeStart + size) - moduleBase));
-    DWORD endAddress = (DWORD)((pCodeStart + size) - moduleBase);
-
-    // Entries are sorted and terminated by sentinel value (DWORD)-1
-    for ( ; RUNTIME_FUNCTION__BeginAddress(pFunctionEntry) < endAddress; pFunctionEntry++)
-    {
-#ifdef _TARGET_AMD64_
-        _ASSERTE((pFunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT) == 0);
-#endif
-
-#if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS)
-        if (IsFunctionFragment(moduleBase, pFunctionEntry))
-        {
-            // This is a fragment (not the funclet beginning); skip it
-            continue;
-        }
-#endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
-
-        if (*pnFunclets < dwLength)
-        {
-            TADDR funcletStartAddress = (moduleBase + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry)) + ofsAdj;
-            _ASSERTE(FitsInU4(funcletStartAddress - pCodeStart));
-            pStartFuncletOffsets[*pnFunclets] = (DWORD)(funcletStartAddress - pCodeStart);
-        }
-        (*pnFunclets)++;
-    }
 }
 
 DWORD NativeImageJitManager::GetFuncletStartOffsets(const METHODTOKEN& MethodToken, DWORD* pStartFuncletOffsets, DWORD dwLength)
@@ -5824,7 +5918,7 @@ BOOL NativeImageJitManager::IsFilterFunclet(EECodeInfo * pCodeInfo)
     return fRet;
 }
 
-#endif  // WIN64EXCEPTIONS
+#endif  // FEATURE_EH_FUNCLETS
  
 StubCodeBlockKind NativeImageJitManager::GetStubCodeBlockKind(RangeSection * pRangeSection, PCODE currentPC)
 {
@@ -5832,7 +5926,6 @@ StubCodeBlockKind NativeImageJitManager::GetStubCodeBlockKind(RangeSection * pRa
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -5930,7 +6023,7 @@ void NativeImageJitManager::JitTokenToMethodRegionInfo(const METHODTOKEN& Method
 
         PTR_RUNTIME_FUNCTION FunctionEntry;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         while (pColdCodeMap[ColdMethodIndex].mainFunctionEntryRVA == 0)
             ColdMethodIndex--;
 
@@ -5985,82 +6078,7 @@ void NativeImageJitManager::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
     IJitManager::EnumMemoryRegions(flags);
 }
 
-#if defined(WIN64EXCEPTIONS)
-
-// 
-// To locate an entry in the function entry table (the program exceptions data directory), the debugger
-// performs a binary search over the table.  This function reports the entries that are encountered in the
-// binary search.
-// 
-// Parameters:
-//   pRtf: The target function table entry to be located
-//   pNativeLayout: A pointer to the loaded native layout for the module containing pRtf
-//   
-static void EnumRuntimeFunctionEntriesToFindEntry(PTR_RUNTIME_FUNCTION pRtf, PTR_PEImageLayout pNativeLayout)
-{
-    pRtf.EnumMem();
-
-    if (pNativeLayout == NULL)
-    {
-        return;
-    }
-
-    IMAGE_DATA_DIRECTORY * pProgramExceptionsDirectory = pNativeLayout->GetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_EXCEPTION);
-    if (!pProgramExceptionsDirectory || 
-        (pProgramExceptionsDirectory->Size == 0) ||
-        (pProgramExceptionsDirectory->Size % sizeof(T_RUNTIME_FUNCTION) != 0))
-    {
-        // Program exceptions directory malformatted
-        return;
-    }
-
-    PTR_BYTE moduleBase(pNativeLayout->GetBase());
-    PTR_RUNTIME_FUNCTION firstFunctionEntry(moduleBase + pProgramExceptionsDirectory->VirtualAddress);
-
-    if (pRtf < firstFunctionEntry ||
-        ((dac_cast<TADDR>(pRtf) - dac_cast<TADDR>(firstFunctionEntry)) % sizeof(T_RUNTIME_FUNCTION) != 0))
-    {
-        // Program exceptions directory malformatted
-        return;
-    }
-    
-// Review conversion of size_t to ULONG.
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable:4267)
-#endif // defined(_MSC_VER)
-
-    ULONG indexToLocate = pRtf - firstFunctionEntry;
-
-#if defined(_MSC_VER)   
-#pragma warning(pop)
-#endif // defined(_MSC_VER)
-
-    ULONG low = 0; // index in the function entry table of low end of search range
-    ULONG high = (pProgramExceptionsDirectory->Size)/sizeof(T_RUNTIME_FUNCTION) - 1; // index of high end of search range
-    ULONG mid = (low + high) /2; // index of entry to be compared
-
-    if (indexToLocate > high)
-    {
-        return;
-    }
-
-    while (indexToLocate != mid)
-    {
-        PTR_RUNTIME_FUNCTION functionEntry = firstFunctionEntry + mid;
-        functionEntry.EnumMem();
-        if (indexToLocate > mid)
-        {
-            low = mid + 1;
-        }
-        else
-        {
-            high = mid - 1;
-        }
-        mid = (low + high) /2;
-        _ASSERTE( low <= mid && mid <= high );
-    }
-}
+#if defined(FEATURE_EH_FUNCLETS)
 
 //
 // EnumMemoryRegionsForMethodUnwindInfo - enumerate the memory necessary to read the unwind info for the
@@ -6097,8 +6115,12 @@ void NativeImageJitManager::EnumMemoryRegionsForMethodUnwindInfo(CLRDataEnumMemo
         DacEnumMemoryRegion(PTR_TO_TADDR(pUnwindData), size); 
 }
 
-#endif //WIN64EXCEPTIONS
+#endif //FEATURE_EH_FUNCLETS
 #endif // #ifdef DACCESS_COMPILE
+
+#endif // FEATURE_PREJIT
+
+#if defined(FEATURE_PREJIT) || defined(FEATURE_READYTORUN)
 
 // Return start of exception info for a method, or 0 if the method has no EH info
 DWORD NativeExceptionInfoLookupTable::LookupExceptionInfoRVAForMethod(PTR_CORCOMPILE_EXCEPTION_LOOKUP_TABLE pExceptionLookupTable,
@@ -6166,7 +6188,6 @@ int NativeUnwindInfoLookupTable::LookupUnwindInfoForMethod(DWORD RelativePc,
                                                            int High)
 {
     CONTRACTL {
-        SO_TOLERANT;
         NOTHROW;
         GC_NOTRIGGER;
         SUPPORTS_DAC;
@@ -6216,6 +6237,7 @@ int NativeUnwindInfoLookupTable::LookupUnwindInfoForMethod(DWORD RelativePc,
     return -1;
 }
 
+#ifdef FEATURE_PREJIT
 BOOL NativeUnwindInfoLookupTable::HasExceptionInfo(NGenLayoutInfo * pNgenLayout, PTR_RUNTIME_FUNCTION pMainRuntimeFunction)
 {
     LIMITED_METHOD_DAC_CONTRACT;
@@ -6250,133 +6272,10 @@ DWORD NativeUnwindInfoLookupTable::GetMethodDescRVA(NGenLayoutInfo * pNgenLayout
 
     return rva;
 }
-
 #endif // FEATURE_PREJIT
 
-#ifndef DACCESS_COMPILE
+#endif // FEATURE_PREJIT || FEATURE_READYTORUN
 
-//-----------------------------------------------------------------------------
-
-
-// Nirvana Support
-
-MethodDesc* __stdcall Nirvana_FindMethodDesc(PCODE ptr, BYTE*& hotStartAddress, size_t& hotSize, BYTE*& coldStartAddress, size_t & coldSize)
-{
-    EECodeInfo codeInfo(ptr);
-    if (!codeInfo.IsValid())
-        return NULL;
-
-    IJitManager::MethodRegionInfo methodRegionInfo;
-    codeInfo.GetMethodRegionInfo(&methodRegionInfo);
-
-    hotStartAddress  = (BYTE*)methodRegionInfo.hotStartAddress;
-    hotSize          = methodRegionInfo.hotSize;
-    coldStartAddress = (BYTE*)methodRegionInfo.coldStartAddress;
-    coldSize         = methodRegionInfo.coldSize;
-
-    return codeInfo.GetMethodDesc();
-}
-
-
-bool Nirvana_GetMethodInfo(MethodDesc * pMD, BYTE*& hotStartAddress, size_t& hotSize, BYTE*& coldStartAddress, size_t & coldSize)
-{
-    EECodeInfo codeInfo(pMD->GetNativeCode());
-    if (!codeInfo.IsValid())
-        return false;
-
-    IJitManager::MethodRegionInfo methodRegionInfo;
-    codeInfo.GetMethodRegionInfo(&methodRegionInfo);
-
-    hotStartAddress  = (BYTE*)methodRegionInfo.hotStartAddress;
-    hotSize          = methodRegionInfo.hotSize;
-    coldStartAddress = (BYTE*)methodRegionInfo.coldStartAddress;
-    coldSize         = methodRegionInfo.coldSize;
-
-    return true;
-}
-
-
-#include "sigformat.h"
-
-__forceinline bool Nirvana_PrintMethodDescWorker(__in_ecount(iBuffer) char * szBuffer, size_t iBuffer, MethodDesc * pMD, const char * pSigString)
-{
-    if (iBuffer == 0) 
-        return false;
-
-    szBuffer[0] = '\0';
-    pSigString = strchr(pSigString, ' ');
-
-    if (pSigString == NULL)
-        return false;
-
-    ++pSigString;
-
-    LPCUTF8 pNamespace;
-    LPCUTF8 pClassName = pMD->GetMethodTable()->GetFullyQualifiedNameInfo(&pNamespace);
-
-    if (pClassName == NULL)
-        return false;
-
-    if (*pNamespace != 0)
-    {
-        if (_snprintf_s(szBuffer, iBuffer, _TRUNCATE, "%s.%s.%s", pNamespace, pClassName, pSigString) == -1)
-            return false;
-    }
-    else
-    {
-        if (_snprintf_s(szBuffer, iBuffer, _TRUNCATE, "%s.%s", pClassName, pSigString) == -1)
-            return false;
-    }
-
-    _ASSERTE(szBuffer[0] != '\0');
-
-    return true;
-}
-
-bool __stdcall Nirvana_PrintMethodDesc(__in_ecount(iBuffer) char * szBuffer, size_t iBuffer, MethodDesc * pMD)
-{
-    bool fResult = false;
-
-    EX_TRY
-    {
-        NewHolder<SigFormat> pSig = new SigFormat(pMD, NULL, false);
-        fResult = Nirvana_PrintMethodDescWorker(szBuffer, iBuffer, pMD, pSig->GetCString());
-    }
-    EX_CATCH
-    {
-        fResult = false;
-    }
-    EX_END_CATCH(SwallowAllExceptions)
-    
-    return fResult;
-};
-
-
-// Nirvana_Dummy() is a dummy function that is exported privately by ordinal only.
-// The sole purpose of this function is to reference Nirvana_FindMethodDesc(),
-// Nirvana_GetMethodInfo(), and Nirvana_PrintMethodDesc() so that they are not
-// inlined or removed by the compiler or the linker.
-
-DWORD __stdcall Nirvana_Dummy()
-{
-    LIMITED_METHOD_CONTRACT;
-    void * funcs[] = { 
-        (void*)Nirvana_FindMethodDesc,
-        (void*)Nirvana_GetMethodInfo,
-        (void*)Nirvana_PrintMethodDesc 
-    };
-
-    size_t n = sizeof(funcs) / sizeof(funcs[0]);
-
-    size_t sum = 0;
-    for (size_t i = 0; i < n; ++i)
-        sum += (size_t)funcs[i];
-
-    return (DWORD)sum;
-}
-
-
-#endif // #ifndef DACCESS_COMPILE
 
 
 #ifdef FEATURE_PREJIT
@@ -6436,7 +6335,7 @@ BOOL MethodIterator::Next()
         //iterate the hot methods 
         if (methodIteratorOptions & Hot)
         {
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
             //Skip to the next method.
             // skip over method fragments and funclets.
             while (m_CurrentRuntimeFunctionIndex < m_pNgenLayout->m_nRuntimeFunctions[0])
@@ -6456,7 +6355,7 @@ BOOL MethodIterator::Next()
 
     if (methodIteratorOptions & Unprofiled)
     {
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
          //Skip to the next method.
         // skip over method fragments and funclets.
         while (m_CurrentRuntimeFunctionIndex < m_pNgenLayout->m_nRuntimeFunctions[1])
@@ -6521,7 +6420,7 @@ TADDR MethodIterator::GetMethodColdStartAddress()
 
         PTR_RUNTIME_FUNCTION FunctionEntry;
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         DWORD MainFunctionEntryRVA = m_pNgenLayout->m_ColdCodeMap[m_CurrentColdRuntimeFunctionIndex].mainFunctionEntryRVA;
 
         if (MainFunctionEntryRVA == 0)
@@ -6761,7 +6660,6 @@ StubCodeBlockKind ReadyToRunJitManager::GetStubCodeBlockKind(RangeSection * pRan
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -6925,7 +6823,6 @@ BOOL ReadyToRunJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -6959,7 +6856,7 @@ BOOL ReadyToRunJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
         return TRUE;
     }
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
     // Save the raw entry
     PTR_RUNTIME_FUNCTION RawFunctionEntry = pRuntimeFunctions + MethodIndex;
 
@@ -6972,7 +6869,7 @@ BOOL ReadyToRunJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
 
     if (ppMethodDesc)
     {
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         *ppMethodDesc = pMethodDesc;
 #else
         *ppMethodDesc = pInfo->GetMethodDescForEntryPoint(ImageBase + RUNTIME_FUNCTION__BeginAddress(FunctionEntry));
@@ -6988,7 +6885,7 @@ BOOL ReadyToRunJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
         // We are using RUNTIME_FUNCTION as METHODTOKEN
         pCodeInfo->m_methodToken = METHODTOKEN(pRangeSection, dac_cast<TADDR>(FunctionEntry));
 
-#ifdef WIN64EXCEPTIONS
+#ifdef FEATURE_EH_FUNCLETS
         AMD64_ONLY(_ASSERTE((RawFunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT) == 0));
         pCodeInfo->m_pFunctionEntry = RawFunctionEntry;
 #endif
@@ -6997,7 +6894,7 @@ BOOL ReadyToRunJitManager::JitCodeToMethodInfo(RangeSection * pRangeSection,
     return TRUE;
 }
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
 PTR_RUNTIME_FUNCTION ReadyToRunJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 {
     CONTRACTL {
@@ -7087,7 +6984,7 @@ BOOL ReadyToRunJitManager::IsFilterFunclet(EECodeInfo * pCodeInfo)
     return fRet;
 }
 
-#endif  // WIN64EXCEPTIONS
+#endif  // FEATURE_EH_FUNCLETS
 
 void ReadyToRunJitManager::JitTokenToMethodRegionInfo(const METHODTOKEN& MethodToken, 
                                                    MethodRegionInfo * methodRegionInfo)
@@ -7115,7 +7012,7 @@ void ReadyToRunJitManager::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
     IJitManager::EnumMemoryRegions(flags);
 }
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
 
 //
 // EnumMemoryRegionsForMethodUnwindInfo - enumerate the memory necessary to read the unwind info for the
@@ -7152,7 +7049,7 @@ void ReadyToRunJitManager::EnumMemoryRegionsForMethodUnwindInfo(CLRDataEnumMemor
         DacEnumMemoryRegion(PTR_TO_TADDR(pUnwindData), size); 
 }
 
-#endif //WIN64EXCEPTIONS
+#endif //FEATURE_EH_FUNCLETS
 #endif // #ifdef DACCESS_COMPILE
 
 #endif

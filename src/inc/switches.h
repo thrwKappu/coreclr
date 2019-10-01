@@ -34,10 +34,6 @@
     #define LOGGING
 #endif
 
-#if !defined(_TARGET_X86_) || defined(FEATURE_PAL)
-#define WIN64EXCEPTIONS
-#endif
-
 #if !defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
 // Failpoint support
 #if defined(_DEBUG) && !defined(DACCESS_COMPILE) && !defined(FEATURE_PAL)
@@ -47,13 +43,6 @@
 
 #if 0
     #define APPDOMAIN_STATE
-    #define BREAK_ON_UNLOAD
-    #define AD_LOG_MEMORY
-    #define AD_NO_UNLOAD
-    #define AD_SNAPSHOT
-    #define BREAK_META_ACCESS
-    #define AD_BREAK_ON_CANNOT_UNLOAD
-    #define BREAK_ON_CLSLOAD
 
     // Enable to track details of EESuspension
     #define TIME_SUSPEND
@@ -83,7 +72,7 @@
     #error Please add a new #elif clause and define all portability macros for the new platform
 #endif
 
-#if defined(_WIN64)
+#if defined(BIT64)
 #define JIT_IS_ALIGNED
 #endif
 
@@ -185,24 +174,13 @@
 
 // Prefer double alignment for structs and arrays with doubles. Put arrays of doubles more agressively 
 // into large object heap for performance because large object heap is 8 byte aligned 
-#if !defined(FEATURE_64BIT_ALIGNMENT) && !defined(_WIN64)
+#if !defined(FEATURE_64BIT_ALIGNMENT) && !defined(BIT64)
 #define FEATURE_DOUBLE_ALIGNMENT_HINT
 #endif
 
 #if defined(FEATURE_CORESYSTEM)
 #define FEATURE_MINIMETADATA_IN_TRIAGEDUMPS
 #endif // defined(FEATURE_CORESYSTEM)
-
-#if defined(FEATURE_PREJIT) && defined(FEATURE_CORESYSTEM)
-// Desktop CLR allows profilers and debuggers to opt out of loading NGENd images, and to
-// JIT everything instead. "FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS" is roughly the
-// equivalent for Apollo, where MSIL images may not be available at all.
-// FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS allows profilers or debuggers to state
-// they don't want to use pregenerated code, and to instead load the NGENd image but
-// treat it as if it were MSIL by ignoring the prejitted code and prebaked structures,
-// and instead to JIT and load types at run-time.
-#define FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS
-#endif
 
 // If defined, support interpretation.
 #if !defined(CROSSGEN_COMPILE)

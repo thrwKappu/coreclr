@@ -12,16 +12,12 @@ add_definitions(-DSTRONGNAME_IN_VM -DSNAPI_INTERNAL)
 
 set(STRONGNAME_SOURCES
   strongname.cpp
-  strongnamecoreclr.cpp
   strongnameinternal.cpp
 )
 
 convert_to_absolute_path(STRONGNAME_SOURCES ${STRONGNAME_SOURCES})
 
-if(CLR_CMAKE_PLATFORM_UNIX)
-    add_compile_options(-fPIC)
-endif(CLR_CMAKE_PLATFORM_UNIX)
-
 add_subdirectory(dac)
 add_subdirectory(wks)
 add_subdirectory(crossgen)
+add_subdirectory(tool)

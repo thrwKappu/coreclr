@@ -201,7 +201,6 @@ public:
     // i.e. are domain-bound.  If any of the parts are domain-bound
     // then they will all belong to the same domain.
     PTR_BaseDomain GetDomain();
-    BOOL IsDomainNeutral();
 
     PTR_LoaderAllocator GetLoaderAllocator()
     {
@@ -351,7 +350,6 @@ public:
       , m_pCCWTemplate(NULL)
 #endif // FEATURE_COMINTEROP
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         WRAPPER_NO_CONTRACT;
         INDEBUG(Verify());
     }

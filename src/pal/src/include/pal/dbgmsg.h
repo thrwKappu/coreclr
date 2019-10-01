@@ -158,7 +158,6 @@ Using Debug channels at Run Time
 #include "pal/perftrace.h"
 #include "pal/debug.h"
 #include "pal/thread.hpp"
-#include "pal/tls.hpp"
 
 #ifdef __cplusplus
 extern "C"
@@ -191,10 +190,11 @@ typedef enum
     DCI_POLL,
     DCI_CRYPT,
     DCI_SHFOLDER,
-#ifdef FEATURE_PAL_SXS
     DCI_SXS,
-#endif // FEATURE_PAL_SXS
     DCI_NUMA,
+    // Please make sure to update dbg_channel_names when adding entries here.
+
+    // Do not remove this line, as it indicates the end of the list
     DCI_LAST
 } DBG_CHANNEL_ID;
 
@@ -333,16 +333,6 @@ bool DBG_ShouldCheckStackAlignment();
    in tracing macros */
 #define NOTRACE(...)
 
-#if defined(__cplusplus) && defined(FEATURE_PAL_SXS)
-#define __ASSERT_ENTER()                                                \
-    /* DBG_printf_c99() and DebugBreak() need a PAL thread */           \
-    PAL_EnterHolder __holder(PALIsThreadDataInitialized() && \
-        (CorUnix::InternalGetCurrentThread() == NULL || \
-        !CorUnix::InternalGetCurrentThread()->IsInPal()));
-#else /* __cplusplus && FEATURE_PAL_SXS */
-#define __ASSERT_ENTER()
-#endif /* __cplusplus && FEATURE_PAL_SXS */
-
 #if !defined(_DEBUG)
 
 #define ASSERT(...)
@@ -352,17 +342,21 @@ bool DBG_ShouldCheckStackAlignment();
 
 #else /* defined(_DEBUG) */
 
+inline void ANALYZER_NORETURN AssertBreak()
+{
+    if(g_Dbg_asserts_enabled)
+    {
+        DebugBreak();
+    }
+}
+
 #define ASSERT(...)                                                     \
 {                                                                       \
-    __ASSERT_ENTER();                                                   \
     if (output_file && dbg_master_switch)                               \
     {                                                                   \
         DBG_printf(defdbgchan,DLI_ASSERT,TRUE,__FUNCTION__,__FILE__,__LINE__,__VA_ARGS__); \
     }                                                                   \
-    if(g_Dbg_asserts_enabled)                                           \
-    {                                                                   \
-        DebugBreak();                                                   \
-    }                                                                   \
+    AssertBreak();                                                     \
 }
     
 #define _ASSERT(expr) do { if (!(expr)) { ASSERT(""); } } while(0)

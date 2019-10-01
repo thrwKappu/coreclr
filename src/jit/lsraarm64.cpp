@@ -46,7 +46,6 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 int LinearScan::BuildNode(GenTree* tree)
 {
     assert(!tree->isContained());
-    Interval* prefSrcInterval = nullptr;
     int       srcCount;
     int       dstCount      = 0;
     regMaskTP dstCandidates = RBM_NONE;
@@ -55,8 +54,6 @@ int LinearScan::BuildNode(GenTree* tree)
 
     // Reset the build-related members of LinearScan.
     clearBuildState();
-
-    RegisterType registerType = TypeGet(tree);
 
     // Set the default dstCount. This may be modified below.
     if (tree->IsValue())
@@ -90,10 +87,9 @@ int LinearScan::BuildNode(GenTree* tree)
             // is processed, unless this is marked "isLocalDefUse" because it is a stack-based argument
             // to a call or an orphaned dead node.
             //
-            LclVarDsc* const varDsc = &compiler->lvaTable[tree->AsLclVarCommon()->gtLclNum];
+            LclVarDsc* const varDsc = &compiler->lvaTable[tree->AsLclVarCommon()->GetLclNum()];
             if (isCandidateVar(varDsc))
             {
-                INDEBUG(dumpNodeInfo(tree, dstCandidates, 0, 1));
                 return 0;
             }
             srcCount = 0;
@@ -130,9 +126,22 @@ int LinearScan::BuildNode(GenTree* tree)
         case GT_ARGPLACE:
         case GT_NO_OP:
         case GT_START_NONGC:
+            srcCount = 0;
+            assert(dstCount == 0);
+            break;
+
         case GT_PROF_HOOK:
             srcCount = 0;
             assert(dstCount == 0);
+            killMask = getKillSetForProfilerHook();
+            BuildDefsWithKills(tree, 0, RBM_NONE, killMask);
+            break;
+
+        case GT_START_PREEMPTGC:
+            // This kills GC refs in callee save regs
+            srcCount = 0;
+            assert(dstCount == 0);
+            BuildDefsWithKills(tree, 0, RBM_NONE, RBM_NONE);
             break;
 
         case GT_CNS_DBL:
@@ -173,6 +182,8 @@ int LinearScan::BuildNode(GenTree* tree)
 
         case GT_RETURN:
             srcCount = BuildReturn(tree);
+            killMask = getKillSetForReturn();
+            BuildDefsWithKills(tree, 0, RBM_NONE, killMask);
             break;
 
         case GT_RETFILT:
@@ -522,18 +533,10 @@ int LinearScan::BuildNode(GenTree* tree)
             //   0                          -               0
             //   const and <=6 ptr words    -               0
             //   const and <PageSize        No              0
-            //   >6 ptr words               Yes           hasPspSym ? 1 : 0
-            //   Non-const                  Yes           hasPspSym ? 1 : 0
+            //   >6 ptr words               Yes             0
+            //   Non-const                  Yes             0
             //   Non-const                  No              2
             //
-            // PSPSym - If the method has PSPSym increment internalIntCount by 1.
-            //
-            bool hasPspSym;
-#if FEATURE_EH_FUNCLETS
-            hasPspSym = (compiler->lvaPSPSym != BAD_VAR_NUM);
-#else
-            hasPspSym = false;
-#endif
 
             GenTree* size = tree->gtGetOp1();
             if (size->IsCnsIntOrI())
@@ -572,14 +575,6 @@ int LinearScan::BuildNode(GenTree* tree)
                             buildInternalIntRegisterDefForNode(tree);
                         }
                     }
-                    else if (hasPspSym)
-                    {
-                        // greater than 4 and need to zero initialize allocated stack space.
-                        // If the method has PSPSym, we need an internal register to hold regCnt
-                        // since targetReg allocated to GT_LCLHEAP node could be the same as one of
-                        // the the internal registers.
-                        buildInternalIntRegisterDefForNode(tree);
-                    }
                 }
             }
             else
@@ -590,24 +585,8 @@ int LinearScan::BuildNode(GenTree* tree)
                     buildInternalIntRegisterDefForNode(tree);
                     buildInternalIntRegisterDefForNode(tree);
                 }
-                else if (hasPspSym)
-                {
-                    // If the method has PSPSym, we need an internal register to hold regCnt
-                    // since targetReg allocated to GT_LCLHEAP node could be the same as one of
-                    // the the internal registers.
-                    buildInternalIntRegisterDefForNode(tree);
-                }
             }
 
-            // If the method has PSPSym, we need an additional register to relocate it on stack.
-            if (hasPspSym)
-            {
-                // Exclude const size 0
-                if (!size->IsCnsIntOrI() || (size->gtIntCon.gtIconVal > 0))
-                {
-                    buildInternalIntRegisterDefForNode(tree);
-                }
-            }
             if (!size->isContained())
             {
                 BuildUse(size);
@@ -621,15 +600,15 @@ int LinearScan::BuildNode(GenTree* tree)
 #ifdef FEATURE_SIMD
         case GT_SIMD_CHK:
 #endif // FEATURE_SIMD
+#ifdef FEATURE_HW_INTRINSICS
+        case GT_HW_INTRINSIC_CHK:
+#endif // FEATURE_HW_INTRINSICS
         {
             GenTreeBoundsChk* node = tree->AsBoundsChk();
             // Consumes arrLen & index - has no result
             assert(dstCount == 0);
-
-            GenTree* intCns = nullptr;
-            GenTree* other  = nullptr;
-            srcCount        = BuildOperandUses(tree->AsBoundsChk()->gtIndex);
-            srcCount += BuildOperandUses(tree->AsBoundsChk()->gtArrLen);
+            srcCount = BuildOperandUses(node->gtIndex);
+            srcCount += BuildOperandUses(node->gtArrLen);
         }
         break;
 
@@ -785,7 +764,6 @@ int LinearScan::BuildNode(GenTree* tree)
     assert(isLocalDefUse == (tree->IsValue() && tree->IsUnusedValue()));
     assert(!tree->IsUnusedValue() || (dstCount != 0));
     assert(dstCount == tree->GetRegisterDstCount());
-    INDEBUG(dumpNodeInfo(tree, dstCandidates, srcCount, dstCount));
     return srcCount;
 }
 
@@ -1029,7 +1007,6 @@ int LinearScan::BuildHWIntrinsic(GenTreeHWIntrinsic* intrinsicTree)
         op1 = op1->AsArgList()->Current();
     }
 
-    int  dstCount       = intrinsicTree->IsValue() ? 1 : 0;
     bool op2IsDelayFree = false;
     bool op3IsDelayFree = false;
 

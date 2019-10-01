@@ -15,7 +15,11 @@
 #include "gdbjit.h"
 #include "gdbjithelpers.h"
 
+#ifndef __GNUC__
 __declspec(thread) bool tls_isSymReaderInProgress = false;
+#else // !__GNUC__
+thread_local bool tls_isSymReaderInProgress = false;
+#endif // !__GNUC__
 
 #ifdef _DEBUG
 static void DumpElf(const char* methodName, const char *addr, size_t size)
@@ -1063,7 +1067,7 @@ PrimitiveTypeInfo::PrimitiveTypeInfo(TypeHandle typeHandle)
     if (corType == ELEMENT_TYPE_CHAR)
     {
         m_type_name = new char[9];
-        strcpy(m_type_name, "char16_t");
+        strcpy(m_type_name, "WCHAR");
     }
     else
     {

@@ -148,13 +148,11 @@ Exit:
         SAFE_DELETE_ARRAY(m_pAssemblyRefTokens);
     }
 
-    HRESULT Assembly::Init(
-                           IMDInternalImport       *pIMetaDataAssemblyImport,
+    HRESULT Assembly::Init(IMDInternalImport       *pIMetaDataAssemblyImport,
                            PEKIND                   PeKind,
                            PEImage                 *pPEImage,
                            PEImage                 *pNativePEImage,
                            SString                 &assemblyPath,
-                           BOOL                     fInspectionOnly,
                            BOOL                     fIsInGAC)
     {
         HRESULT hr = S_OK;
@@ -178,7 +176,6 @@ Exit:
         // Safe architecture for validation
         PEKIND kAssemblyArchitecture;
         kAssemblyArchitecture = pAssemblyName->GetArchitecture();
-        SetInspectionOnly(fInspectionOnly);
         SetIsInGAC(fIsInGAC);
         SetPEImage(pPEImage);
         SetNativePEImage(pNativePEImage);
@@ -188,7 +185,7 @@ Exit:
         SetAssemblyName(pAssemblyName.Extract(), FALSE /* fAddRef */);
 
         // Finally validate architecture
-        if (!fInspectionOnly && !IsValidArchitecture(kAssemblyArchitecture))
+        if (!IsValidArchitecture(kAssemblyArchitecture))
         {
             // Assembly image can't be executed on this platform
             IF_FAIL_GO(HRESULT_FROM_WIN32(ERROR_BAD_FORMAT));
@@ -207,59 +204,6 @@ Exit:
         return m_pMDImport->GetScopeProps(NULL, pMVID);
     }
     
-    HRESULT Assembly::GetNextAssemblyNameRef(DWORD          nIndex,
-                                             AssemblyName **ppAssemblyName)
-    {
-        HRESULT hr = S_OK;
-        BINDER_LOG_ENTER(L"Assembly::GetNextAssemblyNameRef");
-
-        if (ppAssemblyName == NULL)
-        {
-            IF_FAIL_GO(E_INVALIDARG);
-        }
-        else if (GetNbAssemblyRefTokens() == static_cast<DWORD>(-1))
-        {
-            mdAssembly *pAssemblyRefTokens = NULL;
-            DWORD dwCAssemblyRefTokens = 0;
-
-            IF_FAIL_GO(BINDER_SPACE::GetAssemblyRefTokens(GetMDImport(),
-                                                          &pAssemblyRefTokens,
-                                                          &dwCAssemblyRefTokens));
-
-            if (InterlockedCompareExchangeT(&m_pAssemblyRefTokens,
-                                            pAssemblyRefTokens,
-                                            NULL))
-            {
-                SAFE_DELETE_ARRAY(pAssemblyRefTokens);
-            }
-            SetNbAsssemblyRefTokens(dwCAssemblyRefTokens);
-        }
-
-        _ASSERTE(GetNbAssemblyRefTokens() != static_cast<DWORD>(-1));
-
-        // Verify input index
-        if (nIndex >= GetNbAssemblyRefTokens())
-        {
-            IF_FAIL_GO(HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS));
-        }
-        else
-        {
-            ReleaseHolder<AssemblyName> pAssemblyName;
-
-            SAFE_NEW(pAssemblyName, AssemblyName);
-            IF_FAIL_GO(pAssemblyName->Init(GetMDImport(),
-                                           peNone,
-                                           GetAssemblyRefTokens()[nIndex],
-                                           FALSE /* fIsDefinition */));
-
-            *ppAssemblyName = pAssemblyName.Extract();
-        }
-
-    Exit:
-        BINDER_LOG_LEAVE_HR(L"Assembly::GetNextAssemblyNameRef", hr);
-        return hr;
-    }
-
     /* static */
     PEKIND Assembly::GetSystemArchitecture()
     {
@@ -291,7 +235,7 @@ Exit:
     LPCWSTR Assembly::GetSimpleName() 
     {
         AssemblyName *pAsmName = GetAssemblyName();
-        return (pAsmName == nullptr ? nullptr : pAsmName->GetSimpleName());
+        return (pAsmName == nullptr ? nullptr : (LPCWSTR)pAsmName->GetSimpleName());
     }
 
     HRESULT Assembly::BindAssemblyByName(IAssemblyName * pIAssemblyName, ICLRPrivAssembly ** ppAssembly)
@@ -299,33 +243,11 @@ Exit:
         return (m_pBinder == NULL) ? E_FAIL : m_pBinder->BindAssemblyByName(pIAssemblyName, ppAssembly);
     }
 
-    HRESULT Assembly::FindAssemblyBySpec(
-                LPVOID pvAppDomain,
-                LPVOID pvAssemblySpec,
-                HRESULT * pResult,
-                ICLRPrivAssembly ** ppAssembly)
-    { 
-        return (m_pBinder == NULL) ? E_FAIL : m_pBinder->FindAssemblyBySpec(pvAppDomain, pvAssemblySpec, pResult, ppAssembly); 
-    }
-
-    HRESULT Assembly::VerifyBind (
-                IAssemblyName * pIAssemblyName,
-                ICLRPrivAssembly *pAssembly,
-                ICLRPrivAssemblyInfo *pAssemblyInfo)
-    {
-        return (m_pBinder == NULL) ? E_FAIL : m_pBinder->VerifyBind(pIAssemblyName, pAssembly, pAssemblyInfo);
-    }
-
     HRESULT Assembly::GetBinderID(UINT_PTR *pBinderId)
     {
         return (m_pBinder == NULL) ? E_FAIL : m_pBinder->GetBinderID(pBinderId);
     }
  
-    HRESULT Assembly::GetBinderFlags(DWORD *pBinderFlags)
-    {
-        return (m_pBinder == NULL) ? E_FAIL : m_pBinder->GetBinderFlags(pBinderFlags);
-    }
-
     HRESULT Assembly::GetLoaderAllocator(LPVOID* pLoaderAllocator)
     {
         return (m_pBinder == NULL) ? E_FAIL : m_pBinder->GetLoaderAllocator(pLoaderAllocator);

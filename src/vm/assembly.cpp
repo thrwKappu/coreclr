@@ -18,7 +18,6 @@
 
 #include "assembly.hpp"
 #include "appdomain.hpp"
-#include "perfcounters.h"
 #include "assemblyname.hpp"
 
 
@@ -48,7 +47,6 @@
 
 #include "caparser.h"
 #include "../md/compiler/custattr.h"
-#include "mdaassistants.h"
 
 #include "peimagelayout.inl"
 
@@ -82,6 +80,8 @@
 // to help your debugging.
 DWORD g_dwLoaderReasonForNotSharing = 0; // See code:DomainFile::m_dwReasonForRejectingNativeImage for a similar variable.
 
+volatile uint32_t g_cAssemblies = 0;
+
 // These will sometimes result in a crash with error code 0x80131401 SECURITY_E_INCOMPATIBLE_SHARE
 // "Loading this assembly would produce a different grant set from other instances."
 enum ReasonForNotSharing
@@ -104,22 +104,16 @@ enum ReasonForNotSharing
 // in Assembly::Init()
 //----------------------------------------------------------------------------------------------
 Assembly::Assembly(BaseDomain *pDomain, PEAssembly* pFile, DebuggerAssemblyControlFlags debuggerFlags, BOOL fIsCollectible) :
-    m_FreeFlag(0),
     m_pDomain(pDomain),
     m_pClassLoader(NULL),
     m_pEntryPoint(NULL),
     m_pManifest(NULL),
     m_pManifestFile(clr::SafeAddRef(pFile)),
-    m_pOnDiskManifest(NULL),
     m_pFriendAssemblyDescriptor(NULL),
-    m_pbStrongNameKeyPair(NULL),
-    m_pwStrongNameKeyContainer(NULL),
     m_isDynamic(false),
 #ifdef FEATURE_COLLECTIBLE_TYPES
     m_isCollectible(fIsCollectible),
 #endif
-    m_needsToHideManifestForEmit(FALSE),
-    m_dwDynamicAssemblyAccess(ASSEMBLY_ACCESS_RUN),
     m_nextAvailableModuleIndex(1),
     m_pLoaderAllocator(NULL),
     m_isDisabledPrivateReflection(0),
@@ -128,24 +122,19 @@ Assembly::Assembly(BaseDomain *pDomain, PEAssembly* pFile, DebuggerAssemblyContr
     m_winMDStatus(WinMDStatus_Unknown),
     m_pManifestWinMDImport(NULL),
 #endif // FEATURE_COMINTEROP
-    m_fIsDomainNeutral(pDomain == SharedDomain::GetDomain()),
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    m_bMissingDependenciesCheckDone(FALSE),
-#endif // FEATURE_LOADER_OPTIMIZATION
     m_debuggerFlags(debuggerFlags),
-    m_fTerminated(FALSE),
-    m_HostAssemblyId(0)
+    m_fTerminated(FALSE)
 #ifdef FEATURE_COMINTEROP
     , m_InteropAttributeStatus(INTEROP_ATTRIBUTE_UNSET)
 #endif
-#ifdef FEATURE_PREJIT
+#if defined(FEATURE_PREJIT) || defined(FEATURE_READYTORUN)
     , m_isInstrumentedStatus(IS_INSTRUMENTED_UNSET)
 #endif
 {
     STANDARD_VM_CONTRACT;
 }
 
-// This name needs to stay in sync with AssemblyBuilder.MANIFEST_MODULE_NAME
+// This name needs to stay in sync with AssemblyBuilder.ManifestModuleName
 // which is used in AssemblyBuilder.InitManifestModule
 #define REFEMIT_MANIFEST_MODULE_NAME W("RefEmit_InMemoryManifestModule")
 
@@ -166,34 +155,23 @@ void Assembly::Init(AllocMemTracker *pamTracker, LoaderAllocator *pLoaderAllocat
     }
     else
     {
-        if (!IsDomainNeutral())
+        if (!IsCollectible())
         {
-            if (!IsCollectible())
-            {
-                // pLoaderAllocator will only be non-null for reflection emit assemblies
-                _ASSERTE((pLoaderAllocator == NULL) || (pLoaderAllocator == GetDomain()->AsAppDomain()->GetLoaderAllocator()));
-                m_pLoaderAllocator = GetDomain()->AsAppDomain()->GetLoaderAllocator();
-            }
-            else
-            {
-                _ASSERTE(pLoaderAllocator != NULL); // ppLoaderAllocator must be non-null for collectible assemblies
-
-                m_pLoaderAllocator = pLoaderAllocator;
-            }
+            // pLoaderAllocator will only be non-null for reflection emit assemblies
+            _ASSERTE((pLoaderAllocator == NULL) || (pLoaderAllocator == GetDomain()->AsAppDomain()->GetLoaderAllocator()));
+            m_pLoaderAllocator = GetDomain()->AsAppDomain()->GetLoaderAllocator();
         }
         else
         {
-            _ASSERTE(pLoaderAllocator == NULL); // pLoaderAllocator may only be non-null for collectible types
-            // use global loader heaps
-            m_pLoaderAllocator = SystemDomain::GetGlobalLoaderAllocator();
+            _ASSERTE(pLoaderAllocator != NULL); // ppLoaderAllocator must be non-null for collectible assemblies
+
+            m_pLoaderAllocator = pLoaderAllocator;
         }
     }
     _ASSERTE(m_pLoaderAllocator != NULL);
 
     m_pClassLoader = new ClassLoader(this);
     m_pClassLoader->Init(pamTracker);
-
-    COUNTER_ONLY(GetPerfCounters().m_Loading.cAssemblies++);
 
 #ifndef CROSSGEN_COMPILE
     if (GetManifestFile()->IsDynamic())
@@ -202,6 +180,8 @@ void Assembly::Init(AllocMemTracker *pamTracker, LoaderAllocator *pLoaderAllocat
     else
 #endif
         m_pManifest = Module::Create(this, mdFileNil, GetManifestFile(), pamTracker);
+
+    FastInterlockIncrement((LONG*)&g_cAssemblies);
 
     PrepareModuleForAssembly(m_pManifest, pamTracker);
 
@@ -253,8 +233,7 @@ BOOL Assembly::IsDisabledPrivateReflection()
 
     if (m_isDisabledPrivateReflection == UNINITIALIZED)
     {
-        IMDInternalImport *pImport = GetManifestImport();
-        HRESULT hr = pImport->GetCustomAttributeByName(GetManifestToken(), DISABLED_PRIVATE_REFLECTION_TYPE, NULL, 0);
+        HRESULT hr = GetManifestModule()->GetCustomAttribute(GetManifestToken(), WellKnownAttribute::DisablePrivateReflectionType, NULL, 0);
         IfFailThrow(hr);
 
         if (hr == S_OK)
@@ -286,17 +265,6 @@ Assembly::~Assembly()
     if (m_pFriendAssemblyDescriptor != NULL && m_pFriendAssemblyDescriptor != NO_FRIEND_ASSEMBLIES_MARKER)
         delete m_pFriendAssemblyDescriptor;
 
-    if (m_pbStrongNameKeyPair && (m_FreeFlag & FREE_KEY_PAIR))
-        delete[] m_pbStrongNameKeyPair;
-    if (m_pwStrongNameKeyContainer && (m_FreeFlag & FREE_KEY_CONTAINER))
-        delete[] m_pwStrongNameKeyContainer;
-
-    if (IsDynamic()) {
-        if (m_pOnDiskManifest)
-            // clear the on disk manifest if it is not cleared yet.
-            m_pOnDiskManifest = NULL;
-    }
-
     if (m_pManifestFile)
     {
         m_pManifestFile->Release();
@@ -306,6 +274,11 @@ Assembly::~Assembly()
     if (m_pManifestWinMDImport)
     {
         m_pManifestWinMDImport->Release();
+    }
+
+    if (m_pITypeLib != nullptr && m_pITypeLib != Assembly::InvalidTypeLib)
+    {
+        m_pITypeLib->Release();
     }
 #endif // FEATURE_COMINTEROP
 }
@@ -357,32 +330,13 @@ void Assembly::StartUnload()
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_FORBID_FAULT;
+
 #ifdef PROFILING_SUPPORTED
     if (CORProfilerTrackAssemblyLoads())
     {
         ProfilerCallAssemblyUnloadStarted(this);
     }
 #endif
-
-    // we need to release tlb files eagerly
-#ifdef FEATURE_COMINTEROP
-    if(g_fProcessDetach == FALSE)
-    {
-        DefaultCatchFilterParam param; param.pv = COMPLUS_EXCEPTION_EXECUTE_HANDLER;
-        PAL_TRY(Assembly *, pThis, this)
-        {
-            if (pThis->m_pITypeLib && pThis->m_pITypeLib != (ITypeLib*)-1) {
-                pThis->m_pITypeLib->Release();
-                pThis->m_pITypeLib = NULL;
-            }
-        }
-        PAL_EXCEPT_FILTER(DefaultCatchFilter)
-        {
-        }
-        PAL_ENDTRY
-    }
-#endif // FEATURE_COMINTEROP
-
 }
 
 void Assembly::Terminate( BOOL signalProfiler )
@@ -402,7 +356,7 @@ void Assembly::Terminate( BOOL signalProfiler )
         m_pClassLoader = NULL;
     }
 
-    COUNTER_ONLY(GetPerfCounters().m_Loading.cAssemblies--);
+    FastInterlockDecrement((LONG*)&g_cAssemblies);
 
 #ifdef PROFILING_SUPPORTED
     if (CORProfilerTrackAssemblyLoads())
@@ -427,9 +381,6 @@ Assembly * Assembly::Create(
 
     NewHolder<Assembly> pAssembly (new Assembly(pDomain, pFile, debuggerFlags, fIsCollectible));
 
-    // If there are problems that arise from this call stack, we'll chew up a lot of stack
-    // with the various EX_TRY/EX_HOOKs that we will encounter.
-    INTERIOR_STACK_PROBE_FOR(GetThread(), DEFAULT_ENTRY_PROBE_SIZE); 
 #ifdef PROFILING_SUPPORTED
     {
         BEGIN_PIN_PROFILER(CORProfilerTrackAssemblyLoads());
@@ -458,7 +409,6 @@ Assembly * Assembly::Create(
     EX_END_HOOK;
 #endif
     pAssembly.SuppressRelease();
-    END_INTERIOR_STACK_PROBE;
     
     return pAssembly;
 } // Assembly::Create
@@ -717,33 +667,6 @@ Assembly *Assembly::CreateDynamic(AppDomain *pDomain, CreateDynamicAssemblyArgs 
 
         pAssem->m_isDynamic = true;
 
-        pAssem->m_dwDynamicAssemblyAccess = args->access;
-
-        // Set the additional strong name information
-
-        pAssem->SetStrongNameLevel(Assembly::SN_NONE);
-
-        if (publicKey.GetSize() > 0)
-        {
-            pAssem->SetStrongNameLevel(Assembly::SN_PUBLIC_KEY);
-            {
-                // Since we have no way to validate the public key of a dynamic assembly we don't allow 
-                // partial trust code to emit a dynamic assembly with an arbitrary public key.
-                // Ideally we shouldn't allow anyone to emit a dynamic assembly with only a public key,
-                // but we allow a couple of exceptions to reduce the compat risk: full trust, caller's own key.
-                // As usual we treat anonymously hosted dynamic methods as partial trust code.
-                DomainAssembly* pCallerDomainAssembly = pCallerAssembly->GetDomainAssembly(pCallersDomain);
-                if (pCallerDomainAssembly == pCallersDomain->GetAnonymouslyHostedDynamicMethodsAssembly())
-                {
-                    DWORD cbKey = 0;
-                    const void* pKey = pCallerAssembly->GetPublicKey(&cbKey);
-
-                    if (!publicKey.Equals((const BYTE *)pKey, cbKey))
-                        COMPlusThrow(kInvalidOperationException, W("InvalidOperation_StrongNameKeyPairRequired"));
-                }
-            }
-        }
-
         //we need to suppress release for pAssem to avoid double release
         pAssem.SuppressRelease ();
 
@@ -808,36 +731,10 @@ void Assembly::SetDomainAssembly(DomainAssembly *pDomainAssembly)
 
 #endif // #ifndef DACCESS_COMPILE
 
-DomainAssembly *Assembly::GetDomainAssembly(AppDomain *pDomain)
+DomainAssembly *Assembly::GetDomainAssembly()
 {
-    CONTRACT(DomainAssembly *)
-    {
-        PRECONDITION(CheckPointer(pDomain, NULL_NOT_OK));
-        POSTCONDITION(CheckPointer(RETVAL));
-        THROWS;
-        GC_TRIGGERS;
-    }
-    CONTRACT_END;
-
-    RETURN GetManifestModule()->GetDomainAssembly(pDomain);
-}
-
-DomainAssembly *Assembly::FindDomainAssembly(AppDomain *pDomain)
-{
-    CONTRACT(DomainAssembly *)
-    {
-        PRECONDITION(CheckPointer(pDomain));
-        POSTCONDITION(CheckPointer(RETVAL, NULL_OK));
-        NOTHROW;
-        GC_NOTRIGGER;
-        FORBID_FAULT;
-        SO_TOLERANT;
-        SUPPORTS_DAC;
-    }
-    CONTRACT_END;
-
-    PREFIX_ASSUME (GetManifestModule() !=NULL); 
-    RETURN GetManifestModule()->FindDomainAssembly(pDomain);
+    LIMITED_METHOD_DAC_CONTRACT;
+    return GetManifestModule()->GetDomainAssembly();
 }
 
 PTR_LoaderHeap Assembly::GetLowFrequencyHeap()
@@ -966,7 +863,7 @@ Module *Assembly::FindModuleByExportedType(mdExportedType mdType,
 #ifndef DACCESS_COMPILE
                     // LoadAssembly never returns NULL
                     DomainAssembly * pDomainAssembly =
-                        GetManifestModule()->LoadAssembly(::GetAppDomain(), mdLinkRef);
+                        GetManifestModule()->LoadAssembly(mdLinkRef);
                     PREFIX_ASSUME(pDomainAssembly != NULL);
 
                     RETURN pDomainAssembly->GetCurrentModule();
@@ -1220,7 +1117,6 @@ Module * Assembly::FindModuleByTypeRef(
 
             
             DomainAssembly * pDomainAssembly = pModule->LoadAssembly(
-                    ::GetAppDomain(), 
                     tkType, 
                     szNamespace, 
                     szClassName);
@@ -1260,11 +1156,11 @@ Module *Assembly::FindModuleByName(LPCSTR pszModuleName)
     }
     CONTRACT_END;
 
-    CQuickBytes qbLC;
+    SString moduleName(SString::Utf8, pszModuleName);
+    moduleName.LowerCase();
 
-    // Need to perform case insensitive hashing.
-    UTF8_TO_LOWER_CASE(pszModuleName, qbLC);
-    pszModuleName = (LPUTF8) qbLC.Ptr();
+    StackScratchBuffer buffer;
+    pszModuleName = moduleName.GetUTF8(buffer);
 
     mdFile kFile = GetManifestFileToken(pszModuleName);
     if (kFile == mdTokenNil)
@@ -1566,6 +1462,62 @@ void ValidateMainMethod(MethodDesc * pFD, CorEntryPointType *pType)
     }
 }
 
+struct Param
+{
+    MethodDesc *pFD;
+    short numSkipArgs;
+    INT32 *piRetVal;
+    PTRARRAYREF *stringArgs;
+    CorEntryPointType EntryType;
+    DWORD cCommandArgs;
+    LPWSTR *wzArgs;
+} param;
+
+static void RunMainInternal(Param* pParam)
+{
+    MethodDescCallSite  threadStart(pParam->pFD);
+
+    PTRARRAYREF StrArgArray = NULL;
+    GCPROTECT_BEGIN(StrArgArray);
+
+    // Build the parameter array and invoke the method.
+    if (pParam->EntryType == EntryManagedMain) {
+        if (pParam->stringArgs == NULL) {
+            // Allocate a COM Array object with enough slots for cCommandArgs - 1
+            StrArgArray = (PTRARRAYREF) AllocateObjectArray((pParam->cCommandArgs - pParam->numSkipArgs), g_pStringClass);
+
+            // Create Stringrefs for each of the args
+            for (DWORD arg = pParam->numSkipArgs; arg < pParam->cCommandArgs; arg++) {
+                STRINGREF sref = StringObject::NewString(pParam->wzArgs[arg]);
+                StrArgArray->SetAt(arg - pParam->numSkipArgs, (OBJECTREF) sref);
+            }
+        }
+        else
+            StrArgArray = *pParam->stringArgs;
+    }
+
+    ARG_SLOT stackVar = ObjToArgSlot(StrArgArray);
+
+    if (pParam->pFD->IsVoid())
+    {
+        // Set the return value to 0 instead of returning random junk
+        *pParam->piRetVal = 0;
+        threadStart.Call(&stackVar);
+    }
+    else
+    {
+        *pParam->piRetVal = (INT32)threadStart.Call_RetArgSlot(&stackVar);
+        SetLatchedExitCode(*pParam->piRetVal);
+    }
+
+    GCPROTECT_END();
+
+    //<TODO>
+    // When we get mainCRTStartup from the C++ then this should be able to go away.</TODO>
+    fflush(stdout);
+    fflush(stderr);
+}
+
 /* static */
 HRESULT RunMain(MethodDesc *pFD ,
                 short numSkipArgs,
@@ -1610,16 +1562,8 @@ HRESULT RunMain(MethodDesc *pFD ,
 
     ETWFireEvent(Main_V1);
 
-    struct Param
-    {
-        MethodDesc *pFD;
-        short numSkipArgs;
-        INT32 *piRetVal;
-        PTRARRAYREF *stringArgs;
-        CorEntryPointType EntryType;
-        DWORD cCommandArgs;
-        LPWSTR *wzArgs;
-    } param;
+    Param param;
+
     param.pFD = pFD;
     param.numSkipArgs = numSkipArgs;
     param.piRetVal = piRetVal;
@@ -1630,47 +1574,7 @@ HRESULT RunMain(MethodDesc *pFD ,
 
     EX_TRY_NOCATCH(Param *, pParam, &param)
     {
-        MethodDescCallSite  threadStart(pParam->pFD);
-        
-        PTRARRAYREF StrArgArray = NULL;
-        GCPROTECT_BEGIN(StrArgArray);
-
-        // Build the parameter array and invoke the method.
-        if (pParam->EntryType == EntryManagedMain) {
-            if (pParam->stringArgs == NULL) {
-                // Allocate a COM Array object with enough slots for cCommandArgs - 1
-                StrArgArray = (PTRARRAYREF) AllocateObjectArray((pParam->cCommandArgs - pParam->numSkipArgs), g_pStringClass);
-
-                // Create Stringrefs for each of the args
-                for (DWORD arg = pParam->numSkipArgs; arg < pParam->cCommandArgs; arg++) {
-                    STRINGREF sref = StringObject::NewString(pParam->wzArgs[arg]);
-                    StrArgArray->SetAt(arg - pParam->numSkipArgs, (OBJECTREF) sref);
-                }
-            }
-            else
-                StrArgArray = *pParam->stringArgs;
-        }
-
-        ARG_SLOT stackVar = ObjToArgSlot(StrArgArray);
-
-        if (pParam->pFD->IsVoid()) 
-        {
-            // Set the return value to 0 instead of returning random junk
-            *pParam->piRetVal = 0;
-            threadStart.Call(&stackVar);
-        }
-        else 
-        {
-            *pParam->piRetVal = (INT32)threadStart.Call_RetArgSlot(&stackVar);
-            SetLatchedExitCode(*pParam->piRetVal);
-        }
-
-        GCPROTECT_END();
-
-        //<TODO>
-        // When we get mainCRTStartup from the C++ then this should be able to go away.</TODO>
-        fflush(stdout);
-        fflush(stderr);
+        RunMainInternal(pParam);
     }
     EX_END_NOCATCH
 
@@ -1928,7 +1832,6 @@ BOOL Assembly::FileNotFound(HRESULT hr)
 BOOL Assembly::GetResource(LPCSTR szName, DWORD *cbResource,
                               PBYTE *pbInMemoryResource, Assembly** pAssemblyRef,
                               LPCSTR *szFileName, DWORD *dwLocation,
-                              StackCrawlMark *pStackMark, BOOL fSkipSecurityCheck,
                               BOOL fSkipRaiseResolveEvent)
 {
     CONTRACTL
@@ -1942,15 +1845,15 @@ BOOL Assembly::GetResource(LPCSTR szName, DWORD *cbResource,
     DomainAssembly *pAssembly = NULL;
     BOOL result = GetDomainAssembly()->GetResource(szName, cbResource,
                                                    pbInMemoryResource, &pAssembly,
-                                                   szFileName, dwLocation, pStackMark, fSkipSecurityCheck,
+                                                   szFileName, dwLocation,
                                                    fSkipRaiseResolveEvent);
-    if (result && pAssemblyRef != NULL && pAssembly!=NULL)
+    if (result && pAssemblyRef != NULL && pAssembly != NULL)
         *pAssemblyRef = pAssembly->GetAssembly();
 
     return result;
 }
 
-#ifdef FEATURE_PREJIT
+#if defined(FEATURE_PREJIT) || defined(FEATURE_READYTORUN)
 BOOL Assembly::IsInstrumented()
 {
     STATIC_CONTRACT_THROWS;
@@ -2062,6 +1965,51 @@ BOOL Assembly::IsInstrumentedHelper()
 }
 #endif // FEATURE_PREJIT
 
+
+#ifdef FEATURE_COMINTEROP
+
+ITypeLib * const Assembly::InvalidTypeLib = (ITypeLib *)-1;
+
+ITypeLib* Assembly::GetTypeLib()
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        GC_TRIGGERS;
+        FORBID_FAULT;
+    }
+    CONTRACTL_END
+
+    ITypeLib *pTlb = m_pITypeLib;
+    if (pTlb != nullptr && pTlb != Assembly::InvalidTypeLib)
+        pTlb->AddRef();
+
+    return pTlb;
+} // ITypeLib* Assembly::GetTypeLib()
+
+bool Assembly::TrySetTypeLib(_In_ ITypeLib *pNew)
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        GC_TRIGGERS;
+        FORBID_FAULT;
+        PRECONDITION(CheckPointer(pNew));
+    }
+    CONTRACTL_END
+
+    ITypeLib *pOld = InterlockedCompareExchangeT(&m_pITypeLib, pNew, nullptr);
+    if (pOld != nullptr)
+        return false;
+
+    if (pNew != Assembly::InvalidTypeLib)
+        pNew->AddRef();
+
+    return true;
+} // void Assembly::SetTypeLib()
+
+#endif // FEATURE_COMINTEROP
+
 //***********************************************************
 // Add an assembly to the assemblyref list. pAssemEmitter specifies where
 // the AssemblyRef is emitted to.
@@ -2148,87 +2096,6 @@ void Assembly::AddExportedType(mdExportedType cl)
 }
 
 
-
-
-HRESULT STDMETHODCALLTYPE
-GetAssembliesByName(LPCWSTR  szAppBase,
-                    LPCWSTR  szPrivateBin,
-                    LPCWSTR  szAssemblyName,
-                    IUnknown *ppIUnk[],
-                    ULONG    cMax,
-                    ULONG    *pcAssemblies)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        MODE_PREEMPTIVE;
-        GC_TRIGGERS;
-        INJECT_FAULT(return E_OUTOFMEMORY;);
-    }
-    CONTRACTL_END
-
-    HRESULT hr = S_OK;
-
-    if (g_fEEInit) {
-        // Cannot call this during EE startup
-        return MSEE_E_ASSEMBLYLOADINPROGRESS;
-    }
-
-    if (!(szAssemblyName && ppIUnk && pcAssemblies))
-        return E_POINTER;
-
-    hr = COR_E_NOTSUPPORTED;
-
-    return hr;
-}// Used by the IMetadata API's to access an assemblies metadata.
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-
-void Assembly::SetMissingDependenciesCheckDone()
-{
-    LIMITED_METHOD_CONTRACT;
-    m_bMissingDependenciesCheckDone=TRUE;
-};
-
-BOOL Assembly::MissingDependenciesCheckDone()
-{
-    LIMITED_METHOD_CONTRACT;
-    return m_bMissingDependenciesCheckDone;
-};
-
-
-
-
-BOOL Assembly::CanBeShared(DomainAssembly *pDomainAssembly)
-{
-    PTR_PEAssembly pFile=pDomainAssembly->GetFile();
-
-    if(pFile == NULL)
-        return FALSE;
-
-    if(pFile->IsDynamic())
-        return FALSE;
-
-    if(IsSystem() && pFile->IsSystem())
-        return TRUE;
-
-    if ((pDomainAssembly->GetDebuggerInfoBits()&~(DACF_PDBS_COPIED|DACF_IGNORE_PDBS|DACF_OBSOLETE_TRACK_JIT_INFO))
-        != (m_debuggerFlags&~(DACF_PDBS_COPIED|DACF_IGNORE_PDBS|DACF_OBSOLETE_TRACK_JIT_INFO)))
-    {
-        LOG((LF_CODESHARING,
-             LL_INFO100,
-             "We can't share it, desired debugging flags %x are different than %x\n",
-             pDomainAssembly->GetDebuggerInfoBits(), (m_debuggerFlags&~(DACF_PDBS_COPIED|DACF_IGNORE_PDBS|DACF_OBSOLETE_TRACK_JIT_INFO))));
-        STRESS_LOG2(LF_CODESHARING, LL_INFO100,"Flags diff= %08x [%08x/%08x]",pDomainAssembly->GetDebuggerInfoBits(),
-                    m_debuggerFlags);
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-
-#endif // FEATURE_LOADER_OPTIMIZATION
 
 void DECLSPEC_NORETURN Assembly::ThrowTypeLoadException(LPCUTF8 pszFullName, UINT resIDWhy)
 {
@@ -2349,49 +2216,6 @@ void DECLSPEC_NORETURN Assembly::ThrowBadImageException(LPCUTF8 pszNameSpace,
 
 
 #ifdef FEATURE_COMINTEROP
-//
-// Manage an ITypeLib pointer for this Assembly.
-//
-ITypeLib* Assembly::GetTypeLib()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        FORBID_FAULT;
-    }
-    CONTRACTL_END
-
-    // Get the value we are going to return.
-    ITypeLib *pResult = m_pITypeLib;
-    // If there is a value, AddRef() it.
-    if (pResult && pResult != (ITypeLib*)-1)
-        pResult->AddRef();
-    return pResult;
-} // ITypeLib* Assembly::GetTypeLib()
-
-void Assembly::SetTypeLib(ITypeLib *pNew)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        FORBID_FAULT;
-    }
-    CONTRACTL_END
-
-    ITypeLib *pOld;
-    pOld = InterlockedExchangeT(&m_pITypeLib, pNew);
-    // TypeLibs are refcounted pointers.
-    if (pNew != pOld)
-    {
-        if (pNew && pNew != (ITypeLib*)-1)
-            pNew->AddRef();
-        if (pOld && pOld != (ITypeLib*)-1)
-            pOld->Release();
-    }
-} // void Assembly::SetTypeLib()
-
 Assembly::WinMDStatus Assembly::GetWinMDStatus()
 {
     LIMITED_METHOD_CONTRACT;

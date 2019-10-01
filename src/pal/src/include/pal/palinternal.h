@@ -194,10 +194,18 @@ function_name() to call the system's implementation
 #define isupper DUMMY_isupper
 #define isprint DUMMY_isprint
 #define isdigit DUMMY_isdigit
+#define iswalpha DUMMY_iswalpha
+#define iswdigit DUMMY_iswdigit
+#define iswupper DUMMY_iswupper
+#define towupper DUMMY_towupper
+#define towlower DUMMY_towlower
+#define iswprint DUMMY_iswprint
+#define iswspace DUMMY_iswspace
+#define iswxdigit DUMMY_iswxdigit
+#define wint_t DUMMY_wint_t
 #define srand DUMMY_srand
 #define atoi DUMMY_atoi
 #define atof DUMMY_atof
-#define tm PAL_tm
 #define size_t DUMMY_size_t
 #define time_t PAL_time_t
 #define va_list DUMMY_va_list
@@ -317,13 +325,6 @@ function_name() to call the system's implementation
 #undef va_copy
 #endif
 
-
-#ifdef _VAC_
-#define wchar_16 wchar_t
-#else
-#define wchar_t wchar_16
-#endif // _VAC_
-
 #define ptrdiff_t PAL_ptrdiff_t
 #define intptr_t PAL_intptr_t
 #define uintptr_t PAL_uintptr_t
@@ -340,8 +341,9 @@ function_name() to call the system's implementation
 #undef va_arg
 #endif
 
-#if !defined(_MSC_VER) && defined(_WIN64)
+#if !defined(_MSC_VER) && defined(BIT64)
 #undef _BitScanForward64
+#undef _BitScanReverse64
 #endif 
 
 /* pal.h defines alloca(3) as a compiler builtin.
@@ -395,8 +397,13 @@ function_name() to call the system's implementation
 #undef isxdigit
 #undef isalpha
 #undef isalnum
+#undef iswalpha
+#undef iswdigit
+#undef iswupper
+#undef towupper
+#undef towlower
+#undef wint_t
 #undef atoi
-#undef atol
 #undef atof
 #undef malloc
 #undef realloc
@@ -404,35 +411,22 @@ function_name() to call the system's implementation
 #undef qsort
 #undef bsearch
 #undef time
-#undef tm
-#undef localtime
-#undef mktime
 #undef FILE
 #undef fclose
-#undef setbuf
 #undef fopen
 #undef fread
-#undef feof
 #undef ferror
 #undef ftell
 #undef fflush
 #undef fwrite
 #undef fgets
-#undef fgetws
-#undef fputc
-#undef putchar
 #undef fputs
 #undef fseek
 #undef fgetpos
 #undef fsetpos
 #undef getcwd
-#undef getc
-#undef fgetc
-#undef ungetc
 #undef _flushall
 #undef setvbuf
-#undef mkstemp
-#undef rename
 #undef unlink
 #undef size_t
 #undef time_t
@@ -444,7 +438,6 @@ function_name() to call the system's implementation
 #undef stdout
 #undef stderr
 #undef abs
-#undef labs
 #undef llabs
 #undef acos
 #undef acosh
@@ -461,10 +454,14 @@ function_name() to call the system's implementation
 #undef fabs
 #undef floor
 #undef fmod
+#undef fma
+#undef ilogb
 #undef log
+#undef log2
 #undef log10
 #undef modf
 #undef pow
+#undef scalbn
 #undef sin
 #undef sinh
 #undef sqrt
@@ -485,10 +482,14 @@ function_name() to call the system's implementation
 #undef fabsf
 #undef floorf
 #undef fmodf
+#undef fmaf
+#undef ilogbf
 #undef logf
+#undef log2f
 #undef log10f
 #undef modff
 #undef powf
+#undef scalbnf
 #undef sinf
 #undef sinhf
 #undef sqrtf
@@ -498,11 +499,9 @@ function_name() to call the system's implementation
 #undef srand
 #undef errno
 #undef getenv 
-#undef wcsspn
 #undef open
 #undef glob
 
-#undef wchar_t
 #undef ptrdiff_t
 #undef intptr_t
 #undef uintptr_t
@@ -517,7 +516,6 @@ function_name() to call the system's implementation
 #undef vprintf
 #undef wprintf
 #undef wcstod
-#undef wcstol
 #undef wcstoul
 #undef _wcstoui64
 #undef wcscat
@@ -530,7 +528,6 @@ function_name() to call the system's implementation
 #undef wcspbrk
 #undef wcsstr
 #undef wcscmp
-#undef wcsncat
 #undef wcsncpy
 #undef wcstok
 #undef wcscspn
@@ -544,8 +541,6 @@ function_name() to call the system's implementation
 #undef _mm_getcsr
 #undef _mm_setcsr
 #endif // _AMD64_
-
-#undef ctime
 
 #undef min
 #undef max
@@ -579,7 +574,6 @@ function_name() to call the system's implementation
 #undef siglongjmp
 
 #undef _SIZE_T_DEFINED
-#undef _WCHAR_T_DEFINED
 
 #define _DONT_USE_CTYPE_INLINE_
 #if HAVE_RUNETYPE_H
@@ -594,6 +588,7 @@ function_name() to call the system's implementation
 #define _WITH_GETLINE
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
 #include <pwd.h>
@@ -614,6 +609,8 @@ function_name() to call the system's implementation
    we'll catch any definition conflicts */
 #include <sys/socket.h>
 
+#include <pal/stackstring.hpp>
+
 #if !HAVE_INFTIM
 #define INFTIM  -1
 #endif // !HAVE_INFTIM
@@ -622,6 +619,8 @@ function_name() to call the system's implementation
 
 #undef assert
 #define assert (Use__ASSERTE_instead_of_assert) assert
+
+#define string_countof(a) (sizeof(a) / sizeof(a[0]) - 1)
 
 #ifndef __ANDROID__
 #define TEMP_DIRECTORY_PATH "/tmp/"
@@ -632,6 +631,16 @@ function_name() to call the system's implementation
 #endif
 
 #define PROCESS_PIPE_NAME_PREFIX ".dotnet-pal-processpipe"
+
+#ifdef __APPLE__
+#define APPLICATION_CONTAINER_BASE_PATH_SUFFIX "/Library/Group Containers/"
+
+// Not much to go with, but Max semaphore length on Mac is 31 characters. In a sandbox, the semaphore name
+// must be prefixed with an application group ID. This will be 10 characters for developer ID and extra 2 
+// characters for group name. For example ABCDEFGHIJ.MS. We still need some characters left
+// for the actual semaphore names.
+#define MAX_APPLICATION_GROUP_ID_LENGTH 13
+#endif // __APPLE__
 
 #ifdef __cplusplus
 extern "C"
@@ -654,7 +663,12 @@ typedef enum _TimeConversionConstants
 }
 
 bool
-ReadMemoryValueFromFile(const char* filename, size_t* val);
+ReadMemoryValueFromFile(const char* filename, uint64_t* val);
+
+#ifdef __APPLE__
+bool
+GetApplicationContainerFolder(PathCharString& buffer, const char *applicationGroupId, int applicationGroupIdLength);
+#endif // __APPLE__
 
 /* This is duplicated in utilcode.h for CLR, with cooler type-traits */
 template <typename T>
@@ -717,7 +731,7 @@ inline T* InterlockedCompareExchangePointerT(
 
 #include "volatile.h"
 
-const char StackOverflowMessage[] = "Process is terminating due to StackOverflowException.\n";
+const char StackOverflowMessage[] = "Stack overflow.\n";
 
 #endif // __cplusplus
 

@@ -21,7 +21,6 @@
 #include "siginfo.hpp"
 #include "gcheaputilities.h"
 #include "eedbginterfaceimpl.h" //so we can clearexception in COMPlusThrow
-#include "perfcounters.h"
 #include "eventtrace.h"
 #include "eetoprofinterfacewrapper.inl"
 #include "eedbginterfaceimpl.inl"
@@ -34,7 +33,7 @@
 #include "asmconstants.h"
 #include "virtualcallstub.h"
 
-#ifndef WIN64EXCEPTIONS
+#ifndef FEATURE_EH_FUNCLETS
 MethodDesc * GetUserMethodForILStub(Thread * pThread, UINT_PTR uStubSP, MethodDesc * pILStubMD, Frame ** ppFrameOut);
 
 #if !defined(DACCESS_COMPILE)
@@ -429,14 +428,7 @@ CPFH_AdjustContextForThreadSuspensionRace(CONTEXT *pContext, Thread *pThread)
 }
 #endif // FEATURE_HIJACK
 
-
-
-static inline void
-CPFH_UpdatePerformanceCounters() {
-    WRAPPER_NO_CONTRACT;
-    COUNTER_ONLY(GetPerfCounters().m_Excep.cThrown++);
-}
-
+uint32_t            g_exceptionCount;
 
 //******************************************************************************
 EXCEPTION_DISPOSITION COMPlusAfterUnwind(
@@ -474,10 +466,6 @@ EXCEPTION_DISPOSITION COMPlusAfterUnwind(
 
     LOG((LF_EH, LL_INFO1000, "COMPlusAfterUnwind: going to: pFunc:%#X, pStack:%#X\n",
         tct.pFunc, tct.pStack));
-
-    // TODO: UnwindFrames ends up calling into StackWalkFrames which is SO_INTOLERANT
-    //                 as is UnwindFrames, etc... Should we make COMPlusAfterUnwind SO_INTOLERANT???
-    ANNOTATION_VIOLATION(SOToleranceViolation);
 
     UnwindFrames(pThread, &tct);
 
@@ -649,7 +637,6 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_TOLERANT;
 
 #ifdef _DEBUG
     static int breakOnFirstPass = -1;
@@ -757,7 +744,7 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
         const char * eClsName = "!EXCEPTION_COMPLUS";
         if (e != 0)
         {
-            eClsName = e->GetTrueMethodTable()->GetDebugClassName();
+            eClsName = e->GetMethodTable()->GetDebugClassName();
     }
         LOG((LF_EH, LL_INFO100, "CPFH_RealFirstPassHandler: exception: 0x%08X, class: '%s', IP: 0x%p\n",
              exceptionCode, eClsName, pContext ? GetIP(pContext) : NULL));
@@ -1067,8 +1054,9 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
         tct.pBottomFrame = NULL;
 
         EEToProfilerExceptionInterfaceWrapper::ExceptionThrown(pThread);
+
+        g_exceptionCount++;
         
-        CPFH_UpdatePerformanceCounters();
     } // End of case-1-or-3
 
     {
@@ -1079,7 +1067,6 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
 
 #ifdef FEATURE_CORRUPTING_EXCEPTIONS
         {
-            BEGIN_SO_INTOLERANT_CODE(GetThread());
             // Setup the state in current exception tracker indicating the corruption severity
             // of the active exception.
             CEHelper::SetupCorruptionSeverityForActiveException(bRethrownException, bNestedException, 
@@ -1088,8 +1075,6 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
             // Failfast if exception indicates corrupted process state   
             if (pExInfo->GetCorruptionSeverity() == ProcessCorrupting)
                 EEPOLICY_HANDLE_FATAL_ERROR(exceptionCode);
-                
-            END_SO_INTOLERANT_CODE;
         }
 #endif // FEATURE_CORRUPTING_EXCEPTIONS
 
@@ -1146,10 +1131,7 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
     if (bRethrownException || bNestedException)
     {
         _ASSERTE(pExInfo->m_pPrevNestedInfo != NULL);
-        
-        BEGIN_SO_INTOLERANT_CODE(GetThread());
         SetStateForWatsonBucketing(bRethrownException, pExInfo->GetPreviousExceptionTracker()->GetThrowableAsHandle());
-        END_SO_INTOLERANT_CODE;
     }
 
 #ifdef DEBUGGING_SUPPORTED
@@ -1255,6 +1237,13 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
     CallRtlUnwindSafe(pEstablisherFrame, RtlUnwindCallback, pExceptionRecord, 0);
     // on x86 at least, RtlUnwind always returns
 
+    // The CallRtlUnwindSafe could have popped the explicit frame that the tct.pBottomFrame points to (UMThunkPrestubHandler
+    // does that). In such case, the tct.pBottomFrame needs to be updated to point to the first valid explicit frame.
+    Frame* frame = pThread->GetFrame();
+    if ((tct.pBottomFrame != NULL) && (frame > tct.pBottomFrame))
+    {
+        tct.pBottomFrame = frame;
+    }
     // Note: we've completed the unwind pass up to the establisher frame, and we're headed off to finish our
     // cleanup and end up back in jitted code. Any more FS0 handlers pushed from this point on out will _not_ be
     // unwound.
@@ -1670,7 +1659,7 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
 #ifdef HAVE_GCCOVER // This is a debug only macro
     if (GCStress<cfg_instr_jit>::IsEnabled())
     {
-        // UnsafeTlsGetValue trashes last error. When Complus_GCStress=4, GC is invoked
+        // TlsGetValue trashes last error. When Complus_GCStress=4, GC is invoked
         // on every allowable JITed instruction by means of our exception handling machanism
         // it is very easy to trash the last error. For example, a p/invoke called a native method
         // which sets last error. Before we getting the last error in the IL stub, it is trashed here
@@ -1701,7 +1690,7 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
     Thread *pThread = GetThread();
     if ((pExceptionRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) == 0)
     {
-        if (IsSOExceptionCode(pExceptionRecord->ExceptionCode))
+        if (pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
         {
             EEPolicy::HandleStackOverflow(SOD_ManagedFrameHandler, (void*)pEstablisherFrame);
 
@@ -1729,15 +1718,6 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
 
             return ExceptionContinueSearch;
         }
-        else
-        {
-#ifdef FEATURE_STACK_PROBE
-            if (GetEEPolicy()->GetActionOnFailure(FAIL_StackOverflow) == eRudeUnloadAppDomain)
-            {
-                RetailStackProbe(static_cast<unsigned int>(ADJUST_PROBE(BACKOUT_CODE_STACK_LIMIT)), pThread);
-            }
-#endif
-        }
     }
     else
     {
@@ -1751,7 +1731,7 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
             exceptionCode = GetCurrentExceptionCode();
         }
 
-        if (IsSOExceptionCode(exceptionCode))
+        if (exceptionCode == STATUS_STACK_OVERFLOW)
         {
             // We saved the context during the first pass in case the stack overflow exception is
             // unhandled and Watson dump code needs it.  Now we are in the second pass, therefore
@@ -1792,9 +1772,6 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
         }
     }
 
-    // <TODO> .  We need to probe here, but can't introduce destructors etc. </TODO>
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
-
     if (pExceptionRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
     {
         retVal =  CPFH_UnwindHandler(pExceptionRecord,
@@ -1816,8 +1793,6 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
 
     }
 
-    END_CONTRACT_VIOLATION;
-
     return retVal;
 } // COMPlusFrameHandler()
 
@@ -1832,7 +1807,6 @@ NOINLINE LPVOID COMPlusEndCatchWorker(Thread * pThread)
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     LOG((LF_EH, LL_INFO1000, "COMPlusPEndCatch:called with "
         "pThread:0x%x\n",pThread));
@@ -1842,9 +1816,6 @@ NOINLINE LPVOID COMPlusEndCatchWorker(Thread * pThread)
     pExInfo->m_EHClauseInfo.SetManagedCodeEntered(FALSE);
 
     void* esp = NULL;
-
-    // @todo .  We need to probe in the EH code, but can't introduce destructors etc.
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
 
     // Notify the profiler that the catcher has finished running
     // IL stubs don't contain catch blocks so inability to perform this check does not matter.
@@ -1897,9 +1868,22 @@ NOINLINE LPVOID COMPlusEndCatchWorker(Thread * pThread)
     // Sync managed exception state, for the managed thread, based upon any active exception tracker
     pThread->SyncManagedExceptionState(fIsDebuggerHelperThread);
 
+    if (InlinedCallFrame::FrameHasActiveCall(pThread->m_pFrame))
+    {
+        // When unwinding an exception in ReadyToRun, the JIT_PInvokeEnd helper which unlinks the ICF from 
+        // the thread will be skipped. This is because unlike jitted code, each pinvoke is wrapped by calls
+        // to the JIT_PInvokeBegin and JIT_PInvokeEnd helpers, which push and pop the ICF on the thread. The
+        // ICF is not linked at the method prolog and unlined at the epilog when running R2R code. Since the
+        // JIT_PInvokeEnd helper will be skipped, we need to unlink the ICF here. If the executing method
+        // has another pinovoke, it will re-link the ICF again when the JIT_PInvokeBegin helper is called
+
+        if (ExecutionManager::IsReadyToRunCode(((InlinedCallFrame*)pThread->m_pFrame)->m_pCallerReturnAddress))
+        {
+            pThread->m_pFrame->Pop(pThread);
+        }
+    }
+
     LOG((LF_EH, LL_INFO1000, "COMPlusPEndCatch: esp=%p\n", esp));
-   
-    END_CONTRACT_VIOLATION;
 
     return esp;
 }
@@ -1922,7 +1906,6 @@ LPVOID STDCALL COMPlusEndCatch(LPVOID ebp, DWORD ebx, DWORD edi, DWORD esi, LPVO
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     ETW::ExceptionLog::ExceptionCatchEnd();
     ETW::ExceptionLog::ExceptionThrownEnd();
@@ -2059,7 +2042,6 @@ VOID UnwindExceptionTrackerAndResumeInInterceptionFrame(ExInfo* pExInfo, EHConte
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     _ASSERTE(pExInfo && context);
 
@@ -2081,7 +2063,6 @@ BOOL PopNestedExceptionRecords(LPVOID pTargetSP, BOOL bCheckForUnknownHandlers)
     // No CONTRACT here, because we can't run the risk of it pushing any SEH into the current method.
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     PEXCEPTION_REGISTRATION_RECORD pEHR = GetCurrentSEHRecord();
 
@@ -2509,7 +2490,7 @@ StackWalkAction COMPlusThrowCallback(       // SWA value
         if (throwable != NULL)
         {
             throwable = PossiblyUnwrapThrowable(throwable, pCf->GetAssembly());
-            thrownType = TypeHandle(throwable->GetTrueMethodTable());
+            thrownType = TypeHandle(throwable->GetMethodTable());
         }
     }
 
@@ -2633,8 +2614,6 @@ StackWalkAction COMPlusThrowCallback(       // SWA value
             // Let the profiler know we are entering a filter
             if (fGiveDebuggerAndProfilerNotification)
                 EEToProfilerExceptionInterfaceWrapper::ExceptionSearchFilterEnter(pFunc);
-
-            COUNTER_ONLY(GetPerfCounters().m_Excep.cFiltersExecuted++);
 
             STRESS_LOG3(LF_EH, LL_INFO10, "COMPlusThrowCallback: calling filter code, EHClausePtr:%08x, Start:%08x, End:%08x\n",
                 &EHClause, EHClause.HandlerStartPC, EHClause.HandlerEndPC);
@@ -2886,7 +2865,7 @@ StackWalkAction COMPlusUnwindCallback (CrawlFrame *pCf, ThrowCallbackType *pData
         if (throwable != NULL)
         {
             throwable = PossiblyUnwrapThrowable(throwable, pCf->GetAssembly());
-            thrownType = TypeHandle(throwable->GetTrueMethodTable());
+            thrownType = TypeHandle(throwable->GetMethodTable());
         }
     }
 #ifdef DEBUGGING_SUPPORTED
@@ -2974,8 +2953,6 @@ StackWalkAction COMPlusUnwindCallback (CrawlFrame *pCf, ThrowCallbackType *pData
 
         if (IsFaultOrFinally(&EHClause))
         {
-            COUNTER_ONLY(GetPerfCounters().m_Excep.cFinallysExecuted++);
-
             if (fGiveDebuggerAndProfilerNotification)
                 EEToDebuggerExceptionInterfaceWrapper::ExceptionHandle(pFunc, pMethodAddr, EHClause.HandlerStartPC, pHandlerEBP);
 
@@ -3294,7 +3271,6 @@ int CallJitEHFilterWorker(size_t *pShadowSP, EHContext *pContext)
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     int retVal = EXCEPTION_CONTINUE_SEARCH;
 
@@ -3547,8 +3523,6 @@ EXCEPTION_HANDLER_IMPL(UMThunkPrestubHandler)
 
     EXCEPTION_DISPOSITION retval = ExceptionContinueSearch;
     
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
-    
     // We must forward to the COMPlusFrameHandler. This will unwind the Frame Chain up to here, and also leave the
     // preemptive GC mode set correctly.
     retval = EXCEPTION_HANDLER_FWD(COMPlusFrameHandler);
@@ -3575,8 +3549,6 @@ EXCEPTION_HANDLER_IMPL(UMThunkPrestubHandler)
         pFrame->Pop(pThread);
     }
 
-    END_CONTRACT_VIOLATION;
-    
     return retval;
 }
 
@@ -3604,7 +3576,7 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandlerRevCom)
 }
 #endif // FEATURE_COMINTEROP
 #endif // !DACCESS_COMPILE
-#endif // !WIN64EXCEPTIONS
+#endif // !FEATURE_EH_FUNCLETS
 
 PTR_CONTEXT GetCONTEXTFromRedirectedStubStackFrame(CONTEXT * pContext)
 {
@@ -3618,7 +3590,7 @@ PTR_CONTEXT GetCONTEXTFromRedirectedStubStackFrame(CONTEXT * pContext)
 #ifndef DACCESS_COMPILE
 LONG CLRNoCatchHandler(EXCEPTION_POINTERS* pExceptionInfo, PVOID pv)
 {
-#ifndef WIN64EXCEPTIONS
+#ifndef FEATURE_EH_FUNCLETS
     WRAPPER_NO_CONTRACT;
     STATIC_CONTRACT_ENTRY_POINT;
 
@@ -3637,9 +3609,9 @@ LONG CLRNoCatchHandler(EXCEPTION_POINTERS* pExceptionInfo, PVOID pv)
     //END_ENTRYPOINT_VOIDRET;
 
     return result;
-#else  // !WIN64EXCEPTIONS
+#else  // !FEATURE_EH_FUNCLETS
     return EXCEPTION_CONTINUE_SEARCH;
-#endif // !WIN64EXCEPTIONS
+#endif // !FEATURE_EH_FUNCLETS
 }
 #endif // !DACCESS_COMPILE
 
@@ -3690,7 +3662,10 @@ AdjustContextForVirtualStub(
     }
 
     PCODE callsite = GetAdjustedCallAddress(*dac_cast<PTR_PCODE>(GetSP(pContext)));
-    pExceptionRecord->ExceptionAddress = (PVOID)callsite;
+    if (pExceptionRecord != NULL)
+    {
+        pExceptionRecord->ExceptionAddress = (PVOID)callsite;
+    }
     SetIP(pContext, callsite);
 
 #if defined(GCCOVER_TOLERATE_SPURIOUS_AV)

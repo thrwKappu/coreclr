@@ -364,8 +364,6 @@ public:
         return *this == TypeHandle(g_pObjectClass);
     }
 
-    DWORD IsTransparentProxy() const;
-
     // Retrieve the key corresponding to this handle
     TypeKey GetTypeKey() const;
 
@@ -471,8 +469,6 @@ public:
     PTR_BaseDomain GetDomain() const;
 
     PTR_LoaderAllocator GetLoaderAllocator() const;
-
-    BOOL IsDomainNeutral() const;
 
     // Get the class token, assuming the type handle represents a named type,
     // i.e. a class, a value type, a generic instantiation etc.
@@ -678,7 +674,6 @@ inline CHECK CheckPointer(TypeHandle th, IsNullOK ok = NULL_NOT_OK)
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
-    STATIC_CONTRACT_SO_TOLERANT;
     SUPPORTS_DAC;
     STATIC_CONTRACT_CANNOT_TAKE_LOCK;
 

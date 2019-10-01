@@ -226,7 +226,6 @@ HRESULT ClrDataAccess::EnumMemCLRStatic(IN CLRDataEnumMemoryFlags flags)
         // then run constructor in place
         //
         ReportMem(m_globalBase + g_dacGlobals.SystemDomain__m_pSystemDomain, sizeof(SystemDomain));
-        ReportMem(m_globalBase + g_dacGlobals.SharedDomain__m_pSharedDomain, sizeof(SharedDomain));
 
         // We need IGCHeap pointer to make EEVersion work
         ReportMem(m_globalBase + g_dacGlobals.dac__g_pGCHeap, sizeof(IGCHeap *));
@@ -277,7 +276,6 @@ HRESULT ClrDataAccess::EnumMemCLRStatic(IN CLRDataEnumMemoryFlags flags)
     // then run constructor in place
     //
     CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( SystemDomain::m_pSystemDomain.EnumMem(); )
-    CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( SharedDomain::m_pSharedDomain.EnumMem(); )
     CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( g_pDebugger.EnumMem(); )
     CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( g_pEEInterface.EnumMem(); )
     if (g_pDebugInterface != nullptr)
@@ -938,7 +936,7 @@ HRESULT ClrDataAccess::EnumMemWalkStackHelper(CLRDataEnumMemoryFlags flags,
                             // Pulls in sequence points and local variable info
                             DebugInfoManager::EnumMemoryRegionsForMethodDebugInfo(flags, pMethodDesc);
 
-#if defined(WIN64EXCEPTIONS) && defined(USE_GC_INFO_DECODER)
+#if defined(FEATURE_EH_FUNCLETS) && defined(USE_GC_INFO_DECODER)
                           
                             if (addr != NULL)
                             {
@@ -959,7 +957,7 @@ HRESULT ClrDataAccess::EnumMemWalkStackHelper(CLRDataEnumMemoryFlags flags,
                                     }
                                 }
                             }
-#endif // WIN64EXCEPTIONS && USE_GC_INFO_DECODER
+#endif // FEATURE_EH_FUNCLETS && USE_GC_INFO_DECODER
                         }
                         pMethodDefinition.Clear();
                     }
@@ -1188,9 +1186,6 @@ HRESULT ClrDataAccess::EnumMemDumpAllThreadsStack(CLRDataEnumMemoryFlags flags)
 
                 // Write out the Thread instance
                 DacEnumHostDPtrMem(pThread);
-
-                // Write out the context pointed by the thread
-                DacEnumHostDPtrMem(pThread->GetContext());
 
                 // @TODO
                 // write TEB pointed by the thread

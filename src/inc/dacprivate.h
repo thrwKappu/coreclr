@@ -299,7 +299,7 @@ struct MSLAYOUT DacpMethodTableData : ZeroInit<DacpMethodTableData>
     DWORD ComponentSize;
     mdTypeDef cl; // Metadata token    
     DWORD dwAttrClass; // cached metadata
-    BOOL bIsShared; // flags & enum_flag_DomainNeutral
+    BOOL bIsShared;  // Always false, preserved for backward compatibility
     BOOL bIsDynamic;
     BOOL bContainsPointers;
 
@@ -472,7 +472,7 @@ struct MSLAYOUT DacpAssemblyData : ZeroInit<DacpAssemblyData>
     BOOL isDynamic;
     UINT ModuleCount;
     UINT LoadContext;
-    BOOL isDomainNeutral;
+    BOOL isDomainNeutral; // Always false, preserved for backward compatibility
     DWORD dwLocationFlags;
 
     HRESULT Request(ISOSDacInterface *sos, CLRDATA_ADDRESS addr, CLRDATA_ADDRESS baseDomainPtr)
@@ -527,6 +527,35 @@ struct MSLAYOUT DacpReJitData : ZeroInit<DacpReJitData>
     CLRDATA_ADDRESS                 NativeCodeAddr;
 };
 
+struct MSLAYOUT DacpReJitData2 : ZeroInit<DacpReJitData2>
+{
+    enum Flags
+    {
+        kUnknown,
+        kRequested,
+        kActive,
+        kReverted,
+    };
+
+    ULONG                           rejitID;
+    Flags                           flags;
+    CLRDATA_ADDRESS                 il;
+    CLRDATA_ADDRESS                 ilCodeVersionNodePtr;
+};
+
+struct MSLAYOUT DacpProfilerILData : ZeroInit<DacpProfilerILData>
+{
+    enum ModificationType
+    {
+        Unmodified,
+        ILModified,
+        ReJITModified,
+    };
+
+    ModificationType                type;
+    CLRDATA_ADDRESS                 il;
+    ULONG                           rejitID;
+};
 
 struct MSLAYOUT DacpMethodDescData : ZeroInit<DacpMethodDescData>
 {
@@ -587,16 +616,18 @@ struct MSLAYOUT DacpMethodDescTransparencyData : ZeroInit<DacpMethodDescTranspar
 
 struct MSLAYOUT DacpTieredVersionData
 {
-    enum TieredState 
+    enum OptimizationTier
     {
-        NON_TIERED,
-        TIERED_0,
-        TIERED_1,
-        TIERED_UNKNOWN
+        OptimizationTier_Unknown,
+        OptimizationTier_MinOptJitted,
+        OptimizationTier_Optimized,
+        OptimizationTier_QuickJitted,
+        OptimizationTier_OptimizedTier1,
+        OptimizationTier_ReadyToRun,
     };
     
     CLRDATA_ADDRESS NativeCodeAddr;
-    TieredState     TieredInfo;
+    OptimizationTier OptimizationTier;
     CLRDATA_ADDRESS NativeCodeVersionNodePtr;
 };
 

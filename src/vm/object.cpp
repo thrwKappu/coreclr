@@ -53,7 +53,6 @@ INT32 Object::GetHashCodeEx()
         MODE_COOPERATIVE;
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -91,8 +90,8 @@ INT32 Object::GetHashCodeEx()
         }
         else
         {
-            // If a thread is holding the thin lock or an appdomain index is set, we need a syncblock
-            if ((bits & (SBLK_MASK_LOCK_THREADID | (SBLK_MASK_APPDOMAININDEX << SBLK_APPDOMAIN_SHIFT))) != 0)
+            // If a thread is holding the thin lock we need a syncblock
+            if ((bits & (SBLK_MASK_LOCK_THREADID)) != 0)
             {
                 GetSyncBlock();
                 // No need to replicate the above code dealing with sync blocks
@@ -107,7 +106,7 @@ INT32 Object::GetHashCodeEx()
                     iter++;
                     if ((iter % 1024) != 0 && g_SystemInfo.dwNumberOfProcessors > 1)
                     {
-                        YieldProcessor();           // indicate to the processor that we are spining
+                        YieldProcessorNormalized(); // indicate to the processor that we are spinning
                     }
                     else
                     {
@@ -140,31 +139,12 @@ BOOL Object::ValidateObjectWithPossibleAV()
 
 #ifndef DACCESS_COMPILE
 
-MethodTable *Object::GetTrueMethodTable()
-{
-    CONTRACT(MethodTable*)
-    {
-        MODE_COOPERATIVE;
-        GC_NOTRIGGER;
-        NOTHROW;
-        SO_TOLERANT;
-        POSTCONDITION(CheckPointer(RETVAL));
-    }
-    CONTRACT_END;
-
-    MethodTable *mt = GetMethodTable();
-
-
-    RETURN mt;
-}
-
 TypeHandle Object::GetTrueTypeHandle()
 {
     CONTRACTL
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -172,7 +152,7 @@ TypeHandle Object::GetTrueTypeHandle()
     if (m_pMethTab->IsArray())
         return ((ArrayBase*) this)->GetTypeHandle();
     else
-        return TypeHandle(GetTrueMethodTable());
+        return TypeHandle(GetMethodTable());
 }
 
 // There are cases where it is not possible to get a type handle during a GC.
@@ -192,6 +172,11 @@ TypeHandle Object::GetGCSafeTypeHandleIfPossible() const
     // in some cases, it's always safe and straightforward to get to the MethodTable.
     MethodTable * pMT = GetGCSafeMethodTable();
     _ASSERTE(pMT != NULL);
+
+    if (pMT == g_pFreeObjectMethodTable)
+    {
+        return NULL;
+    }
 
     // Don't look at types that belong to an unloading AppDomain, or else
     // pObj->GetGCSafeTypeHandle() can AV. For example, we encountered this AV when pObj
@@ -243,8 +228,6 @@ TypeHandle Object::GetGCSafeTypeHandleIfPossible() const
 
     Module * pLoaderModule = pMTToCheck->GetLoaderModule();
 
-    BaseDomain * pBaseDomain = pLoaderModule->GetDomain();
-
     // Don't look up types that are unloading due to Collectible Assemblies. Haven't been
     // able to find a case where we actually encounter objects like this that can cause
     // problems; however, it seems prudent to add this protection just in case.
@@ -268,7 +251,7 @@ TypeHandle Object::GetGCSafeTypeHandleIfPossible() const
         GC_TRIGGERS;
         INJECT_FAULT(COMPlusThrowOM());
         PRECONDITION(CheckPointer(pInterfaceMT));
-        PRECONDITION(pObj->GetTrueMethodTable()->IsRestored_NoLogging());
+        PRECONDITION(pObj->GetMethodTable()->IsRestored_NoLogging());
         PRECONDITION(pInterfaceMT->IsInterface());
     }
     CONTRACTL_END
@@ -281,7 +264,7 @@ TypeHandle Object::GetGCSafeTypeHandleIfPossible() const
         pInterfaceMT->CheckRestore();
 
         // Check to see if the static class definition indicates we implement the interface.
-        MethodTable * pMT = pObj->GetTrueMethodTable();
+        MethodTable * pMT = pObj->GetMethodTable();
         if (pMT->CanCastToInterface(pInterfaceMT))
         {
             bSupportsItf = TRUE;
@@ -305,118 +288,6 @@ Assembly *AssemblyBaseObject::GetAssembly()
 {
     WRAPPER_NO_CONTRACT;
     return m_pAssembly->GetAssembly();
-}
-
-#ifdef _DEBUG
-// Object::DEBUG_SetAppDomain specified DEBUG_ONLY in the contract to disable SO-tolerance
-// checking for paths that are DEBUG-only.
-//
-// NOTE: currently this is only used by WIN64 allocation helpers, but they really should
-//       be calling the JIT helper SetObjectAppDomain (which currently only exists for
-//       x86).
-void Object::DEBUG_SetAppDomain(AppDomain *pDomain)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        DEBUG_ONLY;
-        INJECT_FAULT(COMPlusThrowOM(););
-        PRECONDITION(CheckPointer(pDomain));
-    }
-    CONTRACTL_END;
-
-    /*_ASSERTE(GetThread()->IsSOTolerant());*/
-    SetAppDomain(pDomain);
-}
-#endif
-
-void Object::SetAppDomain(AppDomain *pDomain)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        SO_INTOLERANT;
-        INJECT_FAULT(COMPlusThrowOM(););
-        PRECONDITION(CheckPointer(pDomain));
-    }
-    CONTRACTL_END;
-
-#ifndef _DEBUG
-    if (!GetMethodTable()->IsDomainNeutral())
-    {
-        //
-        // If we have a per-app-domain method table, we can 
-        // infer the app domain from the method table, so 
-        // there is no reason to mark the object.
-        //
-        // But we don't do this in a debug build, because
-        // we want to be able to detect the case when the
-        // domain was unloaded from underneath an object (and
-        // the MethodTable will be toast in that case.)
-        //
-
-        _ASSERTE(pDomain == GetMethodTable()->GetDomain());
-    }
-    else
-#endif
-    {
-        ADIndex index = pDomain->GetIndex();
-        GetHeader()->SetAppDomainIndex(index);
-    }
-
-    _ASSERTE(GetHeader()->GetAppDomainIndex().m_dwIndex != 0);
-}
-
-BOOL Object::SetAppDomainNoThrow()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_INTOLERANT;
-    }
-    CONTRACTL_END;
-
-    BOOL success = FALSE;
-
-    EX_TRY
-    {
-        SetAppDomain();
-        success = TRUE;
-    }
-    EX_CATCH
-    {
-        _ASSERTE (!"Exception happened during Object::SetAppDomain");
-    }
-    EX_END_CATCH(RethrowTerminalExceptions)
-
-    return success;
-}
-
-AppDomain *Object::GetAppDomain()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-#ifndef _DEBUG
-    if (!GetMethodTable()->IsDomainNeutral())
-        return (AppDomain*) GetMethodTable()->GetDomain();
-#endif
-
-    ADIndex index = GetHeader()->GetAppDomainIndex();
-
-    if (index.m_dwIndex == 0)
-        return NULL;
-
-    AppDomain *pDomain = SystemDomain::TestGetAppDomainAtIndex(index);
-    return pDomain;
 }
 
 STRINGREF AllocateString(SString sstr)
@@ -476,7 +347,6 @@ void Object::SetOffsetObjectRef(DWORD dwOffset, size_t dwValue)
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     OBJECTREF*  location;
     OBJECTREF   o;
@@ -484,7 +354,7 @@ void Object::SetOffsetObjectRef(DWORD dwOffset, size_t dwValue)
     location = (OBJECTREF *) &GetData()[dwOffset];
     o        = ObjectToOBJECTREF(*(Object **)  &dwValue);
 
-    SetObjectReference( location, o, GetAppDomain() );
+    SetObjectReference( location, o );
 }
 
 void SetObjectReferenceUnchecked(OBJECTREF *dst,OBJECTREF ref)
@@ -565,7 +435,7 @@ void STDCALL CopyValueClassUnchecked(void* dest, void* src, MethodTable *pMT)
             OBJECTREF* srcPtrStop = (OBJECTREF*)((BYTE*) srcPtr + cur->GetSeriesSize() + size);         
             while (srcPtr < srcPtrStop)                                         
             {   
-                SetObjectReferenceUnchecked(destPtr, ObjectToOBJECTREF(*(Object**)srcPtr));
+                SetObjectReference(destPtr, ObjectToOBJECTREF(*(Object**)srcPtr));
                 srcPtr++;
                 destPtr++;
             }                                                               
@@ -779,6 +649,10 @@ VOID Object::ValidateInner(BOOL bDeep, BOOL bVerifyNextHeader, BOOL bVerifySyncB
             if ((nextObj != NULL) &&
                 (nextObj->GetGCSafeMethodTable() != g_pFreeObjectMethodTable))
             {
+                // we need a read barrier here - to make sure we read the object header _after_                
+                // reading data that tells us that the object is eligible for verification
+                // (also see: gc.cpp/a_fit_segment_end_p)
+                VOLATILE_MEMORY_BARRIER();
                 CHECK_AND_TEAR_DOWN(nextObj->GetHeader()->Validate(FALSE));
             }
         }
@@ -810,6 +684,8 @@ VOID Object::ValidateInner(BOOL bDeep, BOOL bVerifyNextHeader, BOOL bVerifySyncB
 void ArrayBase::AssertArrayTypeDescLoaded()
 {
     _ASSERTE (m_pMethTab->IsArray());
+
+    ENABLE_FORBID_GC_LOADER_USE_IN_THIS_SCOPE();
 
     // The type should already be loaded
     // See also: MethodTable::DoFullyLoad
@@ -1087,7 +963,6 @@ BOOL StringObject::CaseInsensitiveCompHelper(__in_ecount(aLength) WCHAR *strACha
         PRECONDITION(CheckPointer(strAChars));
         PRECONDITION(CheckPointer(strBChars));
         PRECONDITION(CheckPointer(result));
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     WCHAR *strAStart = strAChars;
@@ -1142,88 +1017,6 @@ BOOL StringObject::CaseInsensitiveCompHelper(__in_ecount(aLength) WCHAR *strACha
     
 }
 
-/*=============================InternalHasHighChars=============================
-**Action:  Checks if the string can be sorted quickly.  The requirements are that
-**         the string contain no character greater than 0x80 and that the string not
-**         contain an apostrophe or a hypen.  Apostrophe and hyphen are excluded so that
-**         words like co-op and coop sort together.
-**Returns: Void.  The side effect is to set a bit on the string indicating whether or not
-**         the string contains high chars.
-**Arguments: The String to be checked.
-**Exceptions: None
-==============================================================================*/
-DWORD StringObject::InternalCheckHighChars() {
-    WRAPPER_NO_CONTRACT;
-
-    WCHAR *chars;
-    WCHAR c;
-    INT32 length;
-
-    RefInterpretGetStringValuesDangerousForGC((WCHAR **) &chars, &length);
-
-    DWORD stringState = STRING_STATE_FAST_OPS;
-
-    for (int i=0; i<length; i++) {
-        c = chars[i];
-        if (c>=0x80) {
-            SetHighCharState(STRING_STATE_HIGH_CHARS);
-            return STRING_STATE_HIGH_CHARS;
-        } else if (HighCharHelper::IsHighChar((int)c)) {
-            //This means that we have a character which forces special sorting,
-            //but doesn't necessarily force slower casing and indexing.  We'll
-            //set a value to remember this, but we need to check the rest of
-            //the string because we may still find a charcter greater than 0x7f.
-            stringState = STRING_STATE_SPECIAL_SORT;
-        }
-    }
-
-    SetHighCharState(stringState);
-    return stringState;
-}
-
-#ifdef VERIFY_HEAP
-/*=============================ValidateHighChars=============================
-**Action:  Validate if the HighChars bits is set correctly, no side effect
-**Returns: BOOL for result of validation
-**Arguments: The String to be checked.
-**Exceptions: None
-==============================================================================*/
-BOOL StringObject::ValidateHighChars()
-{
-    WRAPPER_NO_CONTRACT;
-    DWORD curStringState = GetHighCharState ();
-    // state could always be undetermined
-    if (curStringState == STRING_STATE_UNDETERMINED)
-    {
-        return TRUE;
-    }
-
-    WCHAR *chars;
-    INT32 length;
-    RefInterpretGetStringValuesDangerousForGC((WCHAR **) &chars, &length);
-
-    DWORD stringState = STRING_STATE_FAST_OPS;
-    for (int i=0; i<length; i++) {
-        WCHAR c = chars[i];
-        if (c>=0x80) 
-        {
-            // if there is a high char in the string, the state has to be STRING_STATE_HIGH_CHARS
-            return curStringState == STRING_STATE_HIGH_CHARS;
-        } 
-        else if (HighCharHelper::IsHighChar((int)c)) {
-            //This means that we have a character which forces special sorting,
-            //but doesn't necessarily force slower casing and indexing.  We'll
-            //set a value to remember this, but we need to check the rest of
-            //the string because we may still find a charcter greater than 0x7f.
-            stringState = STRING_STATE_SPECIAL_SORT;
-        }
-    }
-    
-    return stringState == curStringState;
-}
-
-#endif //VERIFY_HEAP
-
 /*============================InternalTrailByteCheck============================
 **Action: Many years ago, VB didn't have the concept of a byte array, so enterprising
 **        users created one by allocating a BSTR with an odd length and using it to
@@ -1238,7 +1031,6 @@ BOOL StringObject::ValidateHighChars()
 ==============================================================================*/
 BOOL StringObject::HasTrailByte() {
     WRAPPER_NO_CONTRACT;
-    STATIC_CONTRACT_SO_TOLERANT;
     
     SyncBlock * pSyncBlock = PassiveGetSyncBlock();
     if(pSyncBlock != NULL)
@@ -1263,7 +1055,6 @@ BOOL StringObject::GetTrailByte(BYTE *bTrailByte) {
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1307,8 +1098,6 @@ OBJECTREF::OBJECTREF()
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
 
-    STATIC_CONTRACT_VIOLATION(SOToleranceViolation);
-
     m_asObj = (Object*)POISONC;
     Thread::ObjectRefNew(this);
 }
@@ -1322,8 +1111,6 @@ OBJECTREF::OBJECTREF(const OBJECTREF & objref)
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_MODE_COOPERATIVE;
     STATIC_CONTRACT_FORBID_FAULT;
-
-    STATIC_CONTRACT_VIOLATION(SOToleranceViolation);
 
     VALIDATEOBJECT(objref.m_asObj);
 
@@ -1357,8 +1144,6 @@ OBJECTREF::OBJECTREF(TADDR nul)
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
-
-    STATIC_CONTRACT_VIOLATION(SOToleranceViolation);
 
     //_ASSERTE(nul == 0);
     m_asObj = (Object*)nul;
@@ -1612,7 +1397,6 @@ void* __cdecl GCSafeMemCpy(void * dest, const void * src, size_t len)
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     if (!(((*(BYTE**)&dest) <  g_lowest_address ) ||
           ((*(BYTE**)&dest) >= g_highest_address)))
@@ -1846,7 +1630,6 @@ BOOL Nullable::IsNullableForTypeHelper(MethodTable* nullableMT, MethodTable* par
     {
         THROWS;
         GC_TRIGGERS;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1917,7 +1700,7 @@ OBJECTREF Nullable::Box(void* srcPtr, MethodTable* nullableMT)
     GCPROTECT_BEGININTERIOR (src);
     MethodTable* argMT = nullableMT->GetInstantiation()[0].GetMethodTable();
     obj = argMT->Allocate();
-    CopyValueClass(obj->UnBox(), src->ValueAddr(nullableMT), argMT, obj->GetAppDomain());
+    CopyValueClass(obj->UnBox(), src->ValueAddr(nullableMT), argMT);
     GCPROTECT_END ();
 
     return obj;
@@ -1933,7 +1716,6 @@ BOOL Nullable::UnBox(void* destPtr, OBJECTREF boxedVal, MethodTable* destMT)
         THROWS;
         GC_TRIGGERS;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     Nullable* dest = (Nullable*) destPtr;
@@ -1962,7 +1744,7 @@ BOOL Nullable::UnBox(void* destPtr, OBJECTREF boxedVal, MethodTable* destMT)
             // This should not happen normally, but we want to be robust
             if (destMT->IsEquivalentTo(boxedVal->GetMethodTable()))
             {
-                CopyValueClass(dest, boxedVal->GetData(), destMT, boxedVal->GetAppDomain());
+                CopyValueClass(dest, boxedVal->GetData(), destMT);
                 fRet = TRUE;
             }
             else
@@ -1973,7 +1755,7 @@ BOOL Nullable::UnBox(void* destPtr, OBJECTREF boxedVal, MethodTable* destMT)
         else
         {
             *dest->HasValueAddr(destMT) = true;
-            CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable(), boxedVal->GetAppDomain());
+            CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable());
             fRet = TRUE;
         }
         GCPROTECT_END();
@@ -1991,7 +1773,6 @@ BOOL Nullable::UnBoxNoGC(void* destPtr, OBJECTREF boxedVal, MethodTable* destMT)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     Nullable* dest = (Nullable*) destPtr;
@@ -2017,14 +1798,14 @@ BOOL Nullable::UnBoxNoGC(void* destPtr, OBJECTREF boxedVal, MethodTable* destMT)
             // This should not happen normally, but we want to be robust
             if (destMT == boxedVal->GetMethodTable())
             {
-                CopyValueClass(dest, boxedVal->GetData(), destMT, boxedVal->GetAppDomain());
+                CopyValueClass(dest, boxedVal->GetData(), destMT);
                 return TRUE;
             }
             return FALSE;
         }
 
         *dest->HasValueAddr(destMT) = true;
-        CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable(), boxedVal->GetAppDomain());
+        CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable());
     }
     return TRUE;
 }
@@ -2040,7 +1821,6 @@ BOOL Nullable::UnBoxIntoArgNoGC(ArgDestination *argDest, OBJECTREF boxedVal, Met
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -2068,7 +1848,7 @@ BOOL Nullable::UnBoxIntoArgNoGC(ArgDestination *argDest, OBJECTREF boxedVal, Met
                 // This should not happen normally, but we want to be robust
                 if (destMT == boxedVal->GetMethodTable())
                 {
-                    CopyValueClassArg(argDest, boxedVal->GetData(), destMT, boxedVal->GetAppDomain(), 0);
+                    CopyValueClassArg(argDest, boxedVal->GetData(), destMT, 0);
                     return TRUE;
                 }
                 return FALSE;
@@ -2077,7 +1857,7 @@ BOOL Nullable::UnBoxIntoArgNoGC(ArgDestination *argDest, OBJECTREF boxedVal, Met
             Nullable* dest = (Nullable*)argDest->GetStructGenRegDestinationAddress();
             *dest->HasValueAddr(destMT) = true;
             int destOffset = (BYTE*)dest->ValueAddr(destMT) - (BYTE*)dest;
-            CopyValueClassArg(argDest, boxedVal->UnBox(), boxedVal->GetMethodTable(), boxedVal->GetAppDomain(), destOffset);
+            CopyValueClassArg(argDest, boxedVal->UnBox(), boxedVal->GetMethodTable(), destOffset);
         }
         return TRUE;
     }
@@ -2097,7 +1877,6 @@ void Nullable::UnBoxNoCheck(void* destPtr, OBJECTREF boxedVal, MethodTable* dest
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     Nullable* dest = (Nullable*) destPtr;
@@ -2121,11 +1900,11 @@ void Nullable::UnBoxNoCheck(void* destPtr, OBJECTREF boxedVal, MethodTable* dest
         {
             // For safety's sake, also allow true nullables to be unboxed normally.  
             // This should not happen normally, but we want to be robust
-            CopyValueClass(dest, boxedVal->GetData(), destMT, boxedVal->GetAppDomain());
+            CopyValueClass(dest, boxedVal->GetData(), destMT);
         }
 
         *dest->HasValueAddr(destMT) = true;
-        CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable(), boxedVal->GetAppDomain());
+        CopyValueClass(dest->ValueAddr(destMT), boxedVal->UnBox(), boxedVal->GetMethodTable());
     }
 }
 
@@ -2190,70 +1969,122 @@ StackTraceElement & StackTraceArray::operator[](size_t index)
 }
 
 #if !defined(DACCESS_COMPILE)
-// Define the lock used to access stacktrace from an exception object
+// Define the lock used to access stacktrace from a global exception type
 SpinLock g_StackTraceArrayLock;
 
-void ExceptionObject::SetStackTrace(StackTraceArray const & stackTrace, PTRARRAYREF dynamicMethodArray)
+void ExceptionObject::SetStackTrace(I1ARRAYREF stackTrace, PTRARRAYREF dynamicMethodArray)
 {        
     CONTRACTL
     {
-        GC_NOTRIGGER;
-        NOTHROW;
+        THROWS;
+        GC_TRIGGERS;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
-    Thread *m_pThread = GetThread();
-    SpinLock::AcquireLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
+    if (_stackTraceLock == NULL || GetMethodTable() == g_pOutOfMemoryExceptionClass)
+    {
+        // We can't activate the SyncBlock for an OutOfMemoryException, so use preallocated SpinLock
+        SpinLock::AcquireLock(&g_StackTraceArrayLock);
 
-    SetObjectReference((OBJECTREF*)&_stackTrace, (OBJECTREF)stackTrace.Get(), GetAppDomain());
-    SetObjectReference((OBJECTREF*)&_dynamicMethods, (OBJECTREF)dynamicMethodArray, GetAppDomain());
+        SetObjectReference((OBJECTREF*)&_stackTrace, (OBJECTREF)stackTrace);
+        SetObjectReference((OBJECTREF*)&_dynamicMethods, (OBJECTREF)dynamicMethodArray);
 
-    SpinLock::ReleaseLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
+        SpinLock::ReleaseLock(&g_StackTraceArrayLock);
+    }
+    else
+    {
+        struct _gc
+        {
+            EXCEPTIONREF throwable;
+            OBJECTREF dynamicMethodArray;
+            OBJECTREF stateLock;
+            OBJECTREF trace;
+        };
+        _gc gc;
+        gc.throwable = (EXCEPTIONREF)this;
+        gc.dynamicMethodArray = (OBJECTREF)dynamicMethodArray;
+        gc.stateLock = _stackTraceLock;
+        gc.trace = stackTrace;
+        GCPROTECT_BEGIN(gc);
 
+        // Aquire lock
+        gc.stateLock->EnterObjMonitor();
+
+        SetObjectReference((OBJECTREF*)&gc.throwable->_stackTrace, gc.trace);
+        SetObjectReference((OBJECTREF*)&gc.throwable->_dynamicMethods, gc.dynamicMethodArray);
+
+        // Release lock
+        gc.stateLock->LeaveObjMonitor();
+
+        GCPROTECT_END();
+    }
 }
 
-void ExceptionObject::SetNullStackTrace()
-{        
+void ExceptionObject::GetStackTrace(StackTraceArray& stackTrace, PTRARRAYREF* outDynamicMethodArray /*= NULL*/)
+{
     CONTRACTL
     {
-        GC_NOTRIGGER;
-        NOTHROW;
+        THROWS;
+        GC_TRIGGERS;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
-    Thread *m_pThread = GetThread();
-    SpinLock::AcquireLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
+    if (_stackTraceLock == NULL || GetMethodTable() == g_pOutOfMemoryExceptionClass)
+    {
+        // We can't activate the SyncBlock for an OutOfMemoryException, so use preallocated SpinLock
+        SpinLock::AcquireLock(&g_StackTraceArrayLock);
 
-    I1ARRAYREF stackTraceArray = NULL;
-    PTRARRAYREF dynamicMethodArray = NULL;
+        StackTraceArray temp(_stackTrace);
+        stackTrace.Swap(temp);
 
-    SetObjectReference((OBJECTREF*)&_stackTrace, (OBJECTREF)stackTraceArray, GetAppDomain());
-    SetObjectReference((OBJECTREF*)&_dynamicMethods, (OBJECTREF)dynamicMethodArray, GetAppDomain());
+        if (outDynamicMethodArray != NULL)
+        {
+            *outDynamicMethodArray = _dynamicMethods;
+        }
 
-    SpinLock::ReleaseLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
+        SpinLock::ReleaseLock(&g_StackTraceArrayLock);
+    }
+    else 
+    {
+        struct _gc
+        {
+            EXCEPTIONREF throwable;
+            OBJECTREF stateLock;
+        };
+        _gc gc;
+        gc.throwable = (EXCEPTIONREF)this;
+        gc.stateLock = _stackTraceLock;
+        GCPROTECT_BEGIN(gc);
+
+        // Aquire lock
+        gc.stateLock->EnterObjMonitor();
+
+        StackTraceArray temp(gc.throwable->_stackTrace);
+        stackTrace.Swap(temp);
+
+        if (outDynamicMethodArray != NULL)
+        {
+            *outDynamicMethodArray = gc.throwable->_dynamicMethods;
+        }
+
+        // Release lock
+        gc.stateLock->LeaveObjMonitor();
+
+        GCPROTECT_END();
+    }
 }
-
-#endif // !defined(DACCESS_COMPILE)
-
-void ExceptionObject::GetStackTrace(StackTraceArray & stackTrace, PTRARRAYREF * outDynamicMethodArray /*= NULL*/) const
+#else
+void ExceptionObject::GetStackTrace(StackTraceArray& stackTrace, PTRARRAYREF* outDynamicMethodArray /*= NULL*/) const
 {
     CONTRACTL
     {
         GC_NOTRIGGER;
         NOTHROW;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
-
-#if !defined(DACCESS_COMPILE)
-    Thread *m_pThread = GetThread();
-    SpinLock::AcquireLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
-#endif // !defined(DACCESS_COMPILE)
 
     StackTraceArray temp(_stackTrace);
     stackTrace.Swap(temp);
@@ -2262,9 +2093,22 @@ void ExceptionObject::GetStackTrace(StackTraceArray & stackTrace, PTRARRAYREF * 
     {
         *outDynamicMethodArray = _dynamicMethods;
     }
-
-#if !defined(DACCESS_COMPILE)
-    SpinLock::ReleaseLock(&g_StackTraceArrayLock, SPINLOCK_THREAD_PARAM_ONLY_IN_SOME_BUILDS);
+}
 #endif // !defined(DACCESS_COMPILE)
 
+bool LAHashDependentHashTrackerObject::IsLoaderAllocatorLive()
+{
+    return (ObjectFromHandle(_dependentHandle) != NULL);
+}
+
+void LAHashDependentHashTrackerObject::GetDependentAndLoaderAllocator(OBJECTREF *pLoaderAllocatorRef, GCHEAPHASHOBJECTREF *pGCHeapHash)
+{
+    OBJECTREF primary = ObjectFromHandle(_dependentHandle);
+    if (pLoaderAllocatorRef != NULL)
+        *pLoaderAllocatorRef = primary;
+
+    IGCHandleManager *mgr = GCHandleUtilities::GetGCHandleManager();
+    // Secondary is tracked only if primary is non-null
+    if (pGCHeapHash != NULL)
+        *pGCHeapHash = (GCHEAPHASHOBJECTREF)(OBJECTREF)((primary != NULL) ? mgr->GetDependentHandleSecondary(_dependentHandle) : NULL);
 }

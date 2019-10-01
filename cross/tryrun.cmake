@@ -3,6 +3,7 @@ set(TARGET_ARCH_NAME $ENV{TARGET_BUILD_ARCH})
 
 macro(set_cache_value)
   set(${ARGV0} ${ARGV1} CACHE STRING "Result from TRY_RUN" FORCE)
+  set(${ARGV0}__TRYRUN_OUTPUT "dummy output" CACHE STRING "Output from TRY_RUN" FORCE)
 endmacro()
 
 if(EXISTS ${CROSS_ROOTFS}/usr/lib/gcc/armv6-alpine-linux-musleabihf OR
@@ -23,6 +24,8 @@ if(TARGET_ARCH_NAME MATCHES "^(armel|arm|arm64|x86)$")
   set_cache_value(HAVE_COMPATIBLE_ACOS_EXITCODE 0)
   set_cache_value(HAVE_COMPATIBLE_ASIN_EXITCODE 0)
   set_cache_value(HAVE_COMPATIBLE_ATAN2_EXITCODE 0)
+  set_cache_value(HAVE_COMPATIBLE_ILOGB0_EXITCODE 1)
+  set_cache_value(HAVE_COMPATIBLE_ILOGBNAN_EXITCODE 1)
   set_cache_value(HAVE_COMPATIBLE_LOG10_EXITCODE 0)
   set_cache_value(HAVE_COMPATIBLE_LOG_EXITCODE 0)
   set_cache_value(HAVE_COMPATIBLE_POW_EXITCODE 0)

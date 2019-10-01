@@ -5,7 +5,7 @@
 #include "common.h"
 #include "gcenv.h"
 
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
 
 struct FindFirstInterruptiblePointState
 {
@@ -76,12 +76,14 @@ unsigned FindFirstInterruptiblePoint(CrawlFrame* pCF, unsigned offs, unsigned en
 #endif // USE_GC_INFO_DECODER
 }
 
-#endif // WIN64EXCEPTIONS
+#endif // FEATURE_EH_FUNCLETS
 
 //-----------------------------------------------------------------------------
 // Determine whether we should report the generic parameter context
 // 
-// This is meant to detect the situation where a ThreadAbortException is raised
+// This is meant to detect following situations:
+//
+// When a ThreadAbortException is raised
 // in the prolog of a managed method, before the location for the generics 
 // context has been initialized; when such a TAE is raised, we are open to a
 // race with the GC (e.g. while creating the managed object for the TAE).
@@ -90,9 +92,23 @@ unsigned FindFirstInterruptiblePoint(CrawlFrame* pCF, unsigned offs, unsigned en
 // The long term solution is to avoid raising TAEs in any non-GC safe points, 
 // and to additionally ensure that we do not expose the runtime to TAE 
 // starvation.
+//
+// When we're in the process of resolution of an interface method and the
+// interface method happens to have a default implementation. Normally,
+// such methods require a generic context, but since we didn't resolve the
+// method to an implementation yet, we don't have the right context (in fact,
+// there's no context provided by the caller).
+// See code:CEEInfo::getMethodSigInternal
+//
 inline bool SafeToReportGenericParamContext(CrawlFrame* pCF)
 {
     LIMITED_METHOD_CONTRACT;
+
+    if (!pCF->IsFrameless() && pCF->GetFrame()->GetVTablePtr() == StubDispatchFrame::GetMethodFrameVPtr())
+    {
+        return !((StubDispatchFrame*)pCF->GetFrame())->SuppressParamTypeArg();
+    }
+
     if (!pCF->IsFrameless() || !(pCF->IsActiveFrame() || pCF->IsInterrupted()))
     {
         return true;
@@ -142,7 +158,7 @@ void GcEnumObject(LPVOID pData, OBJECTREF *pObj, uint32_t flags)
     //
     // Sanity check that the flags contain only these three values
     //
-    assert((flags & ~(GC_CALL_INTERIOR|GC_CALL_PINNED|GC_CALL_CHECK_APP_DOMAIN)) == 0);
+    assert((flags & ~(GC_CALL_INTERIOR|GC_CALL_PINNED)) == 0);
 
     // for interior pointers, we optimize the case in which
     //  it points into the current threads stack area
@@ -160,7 +176,6 @@ void GcReportLoaderAllocator(promote_func* fn, ScanContext* sc, LoaderAllocator 
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -190,13 +205,6 @@ StackWalkAction GcStackCrawlCallBack(CrawlFrame* pCF, VOID* pData)
 
     GCCONTEXT   *gcctx = (GCCONTEXT*) pData;
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    if (g_fEnableARM)
-    {
-        gcctx->sc->pCurrentDomain = pCF->GetAppDomain();
-    }
-#endif //FEATURE_APPDOMAIN_RESOURCE_MONITORING
-
     MethodDesc *pMD = pCF->GetFunction();
 
 #ifdef GC_PROFILING
@@ -209,11 +217,11 @@ StackWalkAction GcStackCrawlCallBack(CrawlFrame* pCF, VOID* pData)
     gcctx->cf = pCF;
 
     bool fReportGCReferences = true;
-#if defined(WIN64EXCEPTIONS)
+#if defined(FEATURE_EH_FUNCLETS)
     // We may have unwound this crawlFrame and thus, shouldn't report the invalid
     // references it may contain.
     fReportGCReferences = pCF->ShouldCrawlframeReportGCReferences();
-#endif // defined(WIN64EXCEPTIONS)
+#endif // defined(FEATURE_EH_FUNCLETS)
 
     if (fReportGCReferences)
     {
@@ -240,7 +248,7 @@ StackWalkAction GcStackCrawlCallBack(CrawlFrame* pCF, VOID* pData)
     #endif // _DEBUG
 
             DWORD relOffsetOverride = NO_OVERRIDE_OFFSET;
-#if defined(WIN64EXCEPTIONS) && defined(USE_GC_INFO_DECODER)
+#if defined(FEATURE_EH_FUNCLETS) && defined(USE_GC_INFO_DECODER)
             if (pCF->ShouldParentToFuncletUseUnwindTargetLocationForGCReporting())
             {
                 GCInfoToken gcInfoToken = pCF->GetGCInfoToken();
@@ -270,7 +278,7 @@ StackWalkAction GcStackCrawlCallBack(CrawlFrame* pCF, VOID* pData)
                 }
 
             }
-#endif // WIN64EXCEPTIONS && USE_GC_INFO_DECODER
+#endif // FEATURE_EH_FUNCLETS && USE_GC_INFO_DECODER
 
             pCM->EnumGcRefs(pCF->GetRegisterSet(),
                             pCF->GetCodeInfo(),
@@ -353,7 +361,7 @@ StackWalkAction GcStackCrawlCallBack(CrawlFrame* pCF, VOID* pData)
                         paramContextType = GENERIC_PARAM_CONTEXT_METHODTABLE;
                 }
 
-                if (SafeToReportGenericParamContext(pCF))
+                if (paramContextType != GENERIC_PARAM_CONTEXT_NONE && SafeToReportGenericParamContext(pCF))
                 {
                     // Handle the case where the method is a static shared generic method and we need to keep the type 
                     // of the generic parameters alive

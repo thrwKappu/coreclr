@@ -37,6 +37,9 @@ ValueNumFuncDef(IsInstanceOf, 2, false, false, false)       // Args: 0: Handle o
 ValueNumFuncDef(ReadyToRunCastClass, 2, false, false, false)          // Args: 0: Helper stub address, 1: object being cast.
 ValueNumFuncDef(ReadyToRunIsInstanceOf, 2, false, false, false)       // Args: 0: Helper stub address, 1: object being queried.
 ValueNumFuncDef(TypeHandleToRuntimeType, 1, false, false, false)      // Args: 0: TypeHandle to translate
+ValueNumFuncDef(TypeHandleToRuntimeTypeHandle, 1, false, false, false)      // Args: 0: TypeHandle to translate
+
+ValueNumFuncDef(AreTypesEquivalent, 2, false, false, false) // Args: 0: first TypeHandle, 1: second TypeHandle
 
 ValueNumFuncDef(LdElemA, 3, false, false, false)            // Args: 0: array value; 1: index value; 2: type handle of element.
 
@@ -143,8 +146,6 @@ ValueNumFuncDef(LT_UN, 2, false, false, false)      // unsigned or unordered com
 ValueNumFuncDef(LE_UN, 2, false, false, false)
 ValueNumFuncDef(GE_UN, 2, false, false, false)
 ValueNumFuncDef(GT_UN, 2, false, false, false)
-
-ValueNumFuncDef(MUL64_UN, 2, true, false, false)    // unsigned multiplication (used by 32-bit targets)
 
 // currently we won't constant fold the next six
 

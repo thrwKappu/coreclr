@@ -45,10 +45,9 @@ enum FileLoadLevel
     FILE_LOAD_LOADLIBRARY,
     FILE_LOAD_POST_LOADLIBRARY,
     FILE_LOAD_EAGER_FIXUPS,
-    FILE_LOAD_VTABLE_FIXUPS,
     FILE_LOAD_DELIVER_EVENTS,
+    FILE_LOAD_VTABLE_FIXUPS,
     FILE_LOADED,                    // Loaded by not yet active
-    FILE_LOAD_VERIFY_EXECUTION,
     FILE_ACTIVE                     // Fully active (constructors run & security checked)
 };
 
@@ -314,17 +313,8 @@ class DomainFile
     virtual void DeliverSyncEvents() = 0;
     virtual void DeliverAsyncEvents() = 0;    
     void FinishLoad();
-    void VerifyExecution();
     void Activate();
 #endif
-
-    // This is called when a new active dependency is added.
-    static BOOL PropagateNewActivation(Module *pModuleFrom, Module *pModuleTo);
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    static BOOL PropagateActivationInAppDomain(Module *pModuleFrom, Module *pModuleTo, AppDomain* pDomain);
-#endif
-    // This can be used to verify that no propagation is needed
-    static CHECK CheckUnactivatedInAllDomains(Module *pModule);
 
     // This should be used to permanently set the load to fail. Do not use with transient conditions
     void SetError(Exception *ex);
@@ -485,15 +475,6 @@ enum ModuleIterationOption
     kModIterIncludeAvailableToProfilers  = 3,
 };
 
-
-enum CMD_State
-{
-    CMD_Unknown,
-    CMD_NotNeeded,
-    CMD_IndeedMissing,
-    CMD_Resolved
-};
-
 // --------------------------------------------------------------------------------
 // DomainAssembly is a subclass of DomainFile which specifically represents a assembly.
 // --------------------------------------------------------------------------------
@@ -518,13 +499,6 @@ public:
         LIMITED_METHOD_CONTRACT;
         return m_pLoaderAllocator;
     }
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    
-public:
-    CMD_State CheckMissingDependencies();
-    BOOL MissingDependenciesCheckDone();
-#endif // FEATURE_LOADER_OPTIMIZATION
 
 #ifndef DACCESS_COMPILE
     void ReleaseFiles();
@@ -665,7 +639,6 @@ public:
     BOOL GetResource(LPCSTR szName, DWORD *cbResource,
                      PBYTE *pbInMemoryResource, DomainAssembly** pAssemblyRef,
                      LPCSTR *szFileName, DWORD *dwLocation,
-                     StackCrawlMark *pStackMark, BOOL fSkipSecurityCheck,
                      BOOL fSkipRaiseResolveEvent);
 
 #ifdef FEATURE_PREJIT
@@ -677,9 +650,6 @@ public:
 
     void GetOptimizedIdentitySignature(CORCOMPILE_ASSEMBLY_SIGNATURE *pSignature);
     BOOL CheckZapDependencyIdentities(PEImage *pNativeImage);
-    BOOL CheckZapSecurity(PEImage *pNativeImage);
-
-    BOOL CheckFileSystemTimeStamps(PEFile *pZapManifest);
 
 #endif // FEATURE_PREJIT
 
@@ -761,11 +731,6 @@ private:
  public:
     ULONG HashIdentity();
 
- private:
-
-    BOOL ShouldLoadDomainNeutral();
-    BOOL ShouldLoadDomainNeutralHelper();
-
     // ------------------------------------------------------------
     // Instance data
     // ------------------------------------------------------------
@@ -774,13 +739,10 @@ private:
     LOADERHANDLE                            m_hExposedAssemblyObject;
     PTR_Assembly                            m_pAssembly;
     DebuggerAssemblyControlFlags            m_debuggerFlags;
-    CMD_State                               m_MissingDependenciesCheckStatus;
     ArrayList                               m_Modules;
     BOOL                                    m_fDebuggerUnloadStarted;
     BOOL                                    m_fCollectible;
     Volatile<bool>                          m_fHostAssemblyPublished;
-    Volatile<bool>                          m_fCalculatedShouldLoadDomainNeutral;
-    Volatile<bool>                          m_fShouldLoadDomainNeutral;
     PTR_LoaderAllocator                     m_pLoaderAllocator;
     DomainAssembly*                         m_NextDomainAssemblyInSameALC;
 

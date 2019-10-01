@@ -12,8 +12,16 @@
 #ifndef _DACDBI_IMPL_H_
 #define _DACDBI_IMPL_H_
 
-// Prototype for creation function
+// Prototype for creation functions
+
 STDAPI
+DLLEXPORT
+CLRDataCreateInstance(REFIID iid,
+    ICLRDataTarget * pLegacyTarget,
+    void ** iface);
+
+STDAPI
+DLLEXPORT
 DacDbiInterfaceInstance(
     ICorDebugDataTarget * pTarget,
     CORDB_ADDRESS baseAddress,
@@ -156,6 +164,7 @@ public:
     HRESULT GetILCodeVersionNodeData(VMPTR_ILCodeVersionNode vmILCodeVersionNode, DacSharedReJitInfo* pData);
     HRESULT GetDefinesBitField(ULONG32 *pDefines);
     HRESULT GetMDStructuresVersion(ULONG32* pMDStructuresVersion);
+    HRESULT EnableGCNotificationEvents(BOOL fEnable);
 
 private:
     void TypeHandleToExpandedTypeInfoImpl(AreValueTypesBoxed              boxed,
@@ -340,6 +349,22 @@ public:
     // Returns true if the argument is a runtime callable wrapper
     BOOL IsRcw(VMPTR_Object vmObject);
 
+    BOOL IsDelegate(VMPTR_Object vmObject);
+
+    HRESULT GetDelegateType(VMPTR_Object delegateObject, DelegateType *delegateType);
+
+    HRESULT GetDelegateFunctionData(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_DomainFile *ppFunctionDomainFile,
+        OUT mdMethodDef *pMethodDef);
+
+    HRESULT GetDelegateTargetObject(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_Object *ppTargetObj,
+        OUT VMPTR_AppDomain *ppTargetAppDomain);
+
     // retrieves the list of COM interfaces implemented by vmObject, as it is known at
     // the time of the call (the list may change as new interface types become available
     // in the runtime)
@@ -373,6 +398,17 @@ public:
                         OUT DacDbiArrayList<DebuggerIPCE_ExpandedTypeData> * pTypes);
 
 private:
+    // Given a pointer to a managed function, obtain the method desc for it.
+    // Equivalent to GetMethodDescPtrFromIp, except if the method isn't jitted
+    // it will look for it in code stubs.
+    // Returns:
+    //   S_OK on success.
+    //   If it's a jitted method, error codes equivalent to GetMethodDescPtrFromIp
+    //   E_INVALIDARG if a non-jitted metod can't be located in the stubs.
+    HRESULT GetMethodDescPtrFromIpEx(
+        TADDR funcIp,
+        OUT VMPTR_MethodDesc *ppMD);
+
     BOOL IsExceptionObject(MethodTable* pMT);
 
     // Get the approximate and exact type handles for a type
